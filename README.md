@@ -1,0 +1,2 @@
+# aseprite
+Aseprite file parser
