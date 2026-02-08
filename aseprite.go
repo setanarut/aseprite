@@ -8,29 +8,64 @@ import (
 	"image"
 	"image/color"
 	"io"
+	"io/fs"
 	"math"
+	"os"
 	"time"
+)
+
+type BlendMode uint16
+
+// Bit per pixel
+type Bpp uint16
+
+const (
+	NRGBA     Bpp = 32
+	Grayscale Bpp = 16 // NRGBA for standart image package
+	Indexed   Bpp = 8
+)
+
+const (
+	Normal BlendMode = iota
+	Multiply
+	Screen
+	Overlay
+	Darken
+	Lighten
+	ColorDodge
+	ColorBurn
+	HardLight
+	SoftLight
+	Difference
+	Exclusion
+	Hue
+	Saturation
+	Color
+	Luminosity
+	Addition
+	Subtract
+	Divide
 )
 
 type userDataReceiver interface {
 	setUserData(text string, c color.NRGBA)
 }
 
-type Aseprite struct {
+type Ase struct {
 	Width                   int // Canvas width
 	Height                  int // Canvas height
-	Flags                   uint16
-	Bpp                     uint16
+	ColorDepth              Bpp
 	TransparentPaletteIndex uint8
 	Palette                 color.Palette
 	Frames                  []Frame
 	Layers                  []Layer
 	Slices                  []Slice
 	Tags                    []Tag
-	makeCelFunc             func(f *Aseprite, bounds image.Rectangle, opacity byte, pix []byte) Cel
+
+	// flags uint16
 }
 
-func (a *Aseprite) ReadFrom(r io.Reader) (filesize int64, err error) {
+func (a *Ase) parse(r io.Reader) (filesize int64, err error) {
 	var hdr [128]byte
 	if n, err := io.ReadFull(r, hdr[:]); err != nil {
 		return int64(n), err
@@ -45,22 +80,13 @@ func (a *Aseprite) ReadFrom(r io.Reader) (filesize int64, err error) {
 	totalFrames := int(binary.LittleEndian.Uint16(hdr[6:]))
 	a.Width = int(binary.LittleEndian.Uint16(hdr[8:]))
 	a.Height = int(binary.LittleEndian.Uint16(hdr[10:]))
-	a.Bpp = binary.LittleEndian.Uint16(hdr[12:])
-	a.Flags = binary.LittleEndian.Uint16(hdr[14:])
+	a.ColorDepth = Bpp(binary.LittleEndian.Uint16(hdr[12:]))
+	// a.flags = binary.LittleEndian.Uint16(hdr[14:])
 	a.TransparentPaletteIndex = hdr[28]
 	paletteSize := binary.LittleEndian.Uint16(hdr[32:])
 	a.Palette = make(color.Palette, paletteSize)
 	a.Frames = make([]Frame, 0, totalFrames)
-	switch a.Bpp {
-	case 8:
-		a.makeCelFunc = makeCelImage8
-	case 16:
-		a.makeCelFunc = makeCelImage16
-	case 32:
-		a.makeCelFunc = makeCelImage32
-	default:
-		return 128, errors.New("invalid color depth")
-	}
+
 	for i := range a.Palette {
 		a.Palette[i] = color.Black
 	}
@@ -127,7 +153,7 @@ func (a *Aseprite) ReadFrom(r io.Reader) (filesize int64, err error) {
 					copy(newCels, currentFrame.Cels)
 					currentFrame.Cels = newCels
 				}
-				cel, err := a.parseCelChunk0x2005(chunkData, layerIdx)
+				cel, err := a.parseCel(chunkData, layerIdx)
 				if err != nil {
 					return currentOffset, err
 				}
@@ -136,28 +162,28 @@ func (a *Aseprite) ReadFrom(r io.Reader) (filesize int64, err error) {
 					lastUserDataTarget = &currentFrame.Cels[layerIdx]
 				}
 			case 0x2019:
-				a.parsePaletteChunk0x2019(chunkData)
+				a.parsePalette(chunkData)
 				lastUserDataTarget = nil
 			case 0x0004:
-				a.parseOldPaletteChunk0x0004(chunkData)
+				a.parseOldPalette0x0004(chunkData)
 				lastUserDataTarget = nil
 			case 0x0011:
-				a.parseOldPaletteChunk0x0011(chunkData)
+				a.parseOldPalette0x0011(chunkData)
 				lastUserDataTarget = nil
 			case 0x2018:
-				newTags := a.parseTagsChunk0x2018(chunkData)
+				newTags := a.parseTags(chunkData)
 				startIdx := len(a.Tags)
 				a.Tags = append(a.Tags, newTags...)
 				if len(a.Tags) > startIdx {
 					lastUserDataTarget = &a.Tags[len(a.Tags)-1]
 				}
 			case 0x2022:
-				slice := a.parseSliceChunk0x2022(chunkData, totalFrames)
+				slice := a.parseSlice(chunkData, totalFrames)
 				a.Slices = append(a.Slices, slice)
 				lastUserDataTarget = &a.Slices[len(a.Slices)-1]
 			case 0x2020:
 				if lastUserDataTarget != nil {
-					data, col := a.parseUserDataChunk0x2020(chunkData)
+					data, col := a.parseUserData(chunkData)
 					lastUserDataTarget.setUserData(string(data), col)
 				}
 			default:
@@ -173,7 +199,9 @@ func (a *Aseprite) ReadFrom(r io.Reader) (filesize int64, err error) {
 	}
 	return fileSize, nil
 }
-func (a *Aseprite) parseSliceChunk0x2022(raw []byte, totalFrames int) Slice {
+
+// Chunk0x2022
+func (a *Ase) parseSlice(raw []byte, totalFrames int) Slice {
 	var s Slice
 	nKeysForSlice := int(binary.LittleEndian.Uint32(raw))
 	flags := binary.LittleEndian.Uint32(raw[4:])
@@ -210,7 +238,9 @@ func (a *Aseprite) parseSliceChunk0x2022(raw []byte, totalFrames int) Slice {
 	expandSliceKey(&s, totalFrames, frameIndices)
 	return s
 }
-func (a *Aseprite) parseTagsChunk0x2018(raw []byte) []Tag {
+
+// Chunk0x2018
+func (a *Ase) parseTags(raw []byte) []Tag {
 	ntags := int(binary.LittleEndian.Uint16(raw))
 	tags := make([]Tag, ntags)
 	ptr := raw[10:]
@@ -226,7 +256,9 @@ func (a *Aseprite) parseTagsChunk0x2018(raw []byte) []Tag {
 	}
 	return tags
 }
-func (a *Aseprite) parseUserDataChunk0x2020(raw []byte) (data []byte, col color.NRGBA) {
+
+// Chunk0x2020
+func (a *Ase) parseUserData(raw []byte) (data []byte, col color.NRGBA) {
 	flags := binary.LittleEndian.Uint32(raw)
 	raw = raw[4:]
 	if flags&1 != 0 {
@@ -238,7 +270,9 @@ func (a *Aseprite) parseUserDataChunk0x2020(raw []byte) (data []byte, col color.
 	}
 	return data, col
 }
-func (a *Aseprite) parsePaletteChunk0x2019(raw []byte) {
+
+// Chunk0x2019
+func (a *Ase) parsePalette(raw []byte) {
 	entries := binary.LittleEndian.Uint32(raw[0:])
 	lo := binary.LittleEndian.Uint32(raw[4:])
 	raw = raw[20:]
@@ -260,7 +294,34 @@ func (a *Aseprite) parsePaletteChunk0x2019(raw []byte) {
 		}
 	}
 }
-func (a *Aseprite) parseOldPaletteChunk0x0011(raw []byte) {
+
+func (a *Ase) parseOldPalette0x0004(raw []byte) {
+	packets := binary.LittleEndian.Uint16(raw)
+	raw = raw[2:]
+	currentIndex := 0
+	for i := 0; i < int(packets); i++ {
+		skip := int(raw[0])
+		currentIndex += skip
+		n := int(raw[1])
+		if n == 0 {
+			n = 256
+		}
+		raw = raw[2:]
+		for j := 0; j < n && currentIndex < len(a.Palette); j++ {
+			a.Palette[currentIndex] = color.NRGBA{
+				R: raw[0],
+				G: raw[1],
+				B: raw[2],
+				A: 255,
+			}
+			raw = raw[3:]
+			currentIndex++
+		}
+	}
+}
+
+// Chunk0x0011
+func (a *Ase) parseOldPalette0x0011(raw []byte) {
 	packets := binary.LittleEndian.Uint16(raw)
 	raw = raw[2:]
 	currentIndex := 0
@@ -284,20 +345,27 @@ func (a *Aseprite) parseOldPaletteChunk0x0011(raw []byte) {
 		}
 	}
 }
-func (a *Aseprite) parseCelChunk0x2005(raw []byte, layerIdx int) (*Cel, error) {
-	xpos := int(int16(binary.LittleEndian.Uint16(raw[2:])))
-	ypos := int(int16(binary.LittleEndian.Uint16(raw[4:])))
-	opacity := raw[6]
+
+// Chunk0x2005
+func (a *Ase) parseCel(raw []byte, layerIdx int) (*Cel, error) {
+
+	cel := Cel{}
+
+	x := int(int16(binary.LittleEndian.Uint16(raw[2:])))
+	y := int(int16(binary.LittleEndian.Uint16(raw[4:])))
+
+	cel.Opacity = raw[6]
 	celtype := binary.LittleEndian.Uint16(raw[7:])
 	if layerIdx >= len(a.Layers) {
 		return nil, nil
 	}
 	layer := &a.Layers[layerIdx]
-	if layer.Flags&1 == 0 || layer.Flags&64 != 0 {
+
+	if !isVisibleLayer(layer.flags) || isReferenceLayer(layer.flags) {
 		return nil, nil
 	}
 	raw = raw[16:]
-	finalOpacity := byte((int(opacity) * int(layer.Opacity)) / 255)
+	// finalOpacity := byte((int(opacity) * int(layer.Opacity)) / 255)
 	var pix []byte
 	switch celtype {
 	case 0:
@@ -323,40 +391,59 @@ func (a *Aseprite) parseCelChunk0x2005(raw []byte, layerIdx int) (*Cel, error) {
 	default:
 		return nil, errors.New("unsupported cel type")
 	}
-	width := int(binary.LittleEndian.Uint16(raw))
-	height := int(binary.LittleEndian.Uint16(raw[2:]))
-	bounds := image.Rect(xpos, ypos, xpos+width, ypos+height)
-	c := a.makeCelFunc(a, bounds, finalOpacity, pix)
-	return &c, nil
-}
-func (a *Aseprite) parseOldPaletteChunk0x0004(raw []byte) {
-	packets := binary.LittleEndian.Uint16(raw)
-	raw = raw[2:]
-	currentIndex := 0
-	for i := 0; i < int(packets); i++ {
-		skip := int(raw[0])
-		currentIndex += skip
-		n := int(raw[1])
-		if n == 0 {
-			n = 256
+
+	w := int(binary.LittleEndian.Uint16(raw))
+	h := int(binary.LittleEndian.Uint16(raw[2:]))
+	bounds := image.Rect(x, y, x+w, y+h)
+
+	var img image.Image
+
+	switch a.ColorDepth {
+	case 8:
+		img = &image.Paletted{
+			Pix:     pix,
+			Stride:  bounds.Dx(),
+			Rect:    bounds,
+			Palette: a.Palette,
 		}
-		raw = raw[2:]
-		for j := 0; j < n && currentIndex < len(a.Palette); j++ {
-			a.Palette[currentIndex] = color.NRGBA{
-				R: raw[0],
-				G: raw[1],
-				B: raw[2],
-				A: 255,
+	case 16:
+		nrgba := image.NewNRGBA(bounds)
+		stride := bounds.Dx() * 2
+		for y := bounds.Min.Y; y < bounds.Max.Y; y++ {
+			for x := bounds.Min.X; x < bounds.Max.X; x++ {
+				i := (y-bounds.Min.Y)*stride + (x-bounds.Min.X)*2
+				grayValue := pix[i]
+				alphaValue := pix[i+1]
+				// finalAlpha := uint16(alphaValue) * uint16(opacity) / 255
+				nrgba.SetNRGBA(x, y, color.NRGBA{
+					R: grayValue,
+					G: grayValue,
+					B: grayValue,
+					A: alphaValue,
+				})
 			}
-			raw = raw[3:]
-			currentIndex++
 		}
+		img = nrgba
+	case 32:
+		nrgba := &image.NRGBA{
+			Pix:    pix,
+			Stride: bounds.Dx() * 4,
+			Rect:   bounds,
+		}
+		img = nrgba
+	default:
+		return nil, errors.New("invalid color depth")
 	}
+
+	cel.Image = img
+
+	return &cel, nil
 }
-func (a *Aseprite) buildUserDataText() []byte {
+
+func (a *Ase) buildUserDataText() []byte {
 	n := 0
 	for _, l := range a.Layers {
-		if l.Flags&1 != 0 {
+		if isVisibleLayer(l.flags) {
 			n += len(l.Text)
 		}
 	}
@@ -367,11 +454,11 @@ func (a *Aseprite) buildUserDataText() []byte {
 	}
 	return make([]byte, 0, n)
 }
-func (a *Aseprite) buildLayerUserDataText() [][]byte {
+func (a *Ase) buildLayerUserDataText() [][]byte {
 	userdataText := a.buildUserDataText()
 	ld := make([][]byte, 0, len(a.Layers))
 	for _, l := range a.Layers {
-		if l.Flags&1 != 0 && len(l.Text) > 0 {
+		if isVisibleLayer(l.flags) && len(l.Text) > 0 {
 			ofs := len(userdataText)
 			userdataText = append(userdataText, l.Text...)
 			ld = append(ld, userdataText[ofs:])
@@ -398,8 +485,9 @@ type Slice struct {
 }
 
 type Cel struct {
+	Image   image.Image
+	Opacity uint8
 	UserData
-	Image image.Image
 }
 
 func (c *Cel) setUserData(text string, col color.NRGBA) {
@@ -408,11 +496,15 @@ func (c *Cel) setUserData(text string, col color.NRGBA) {
 }
 
 type Layer struct {
-	Name      string
-	Flags     uint16
-	BlendMode uint16
-	Opacity   byte
+	Name string
+
+	BlendMode BlendMode
+	Opacity   uint8
 	UserData
+
+	flags uint16
+	// 0=Normal (Image), 1=Group, 2=Tilemap
+	layerType uint16
 }
 
 func (l *Layer) setUserData(text string, col color.NRGBA) {
@@ -421,13 +513,18 @@ func (l *Layer) setUserData(text string, col color.NRGBA) {
 }
 
 func (l *Layer) Parse(raw []byte) error {
-	if typ := binary.LittleEndian.Uint16(raw[2:]); typ == 2 {
+
+	l.flags = binary.LittleEndian.Uint16(raw)
+
+	l.layerType = binary.LittleEndian.Uint16(raw[2:])
+	if l.layerType == 2 {
 		return errors.New("tilemap layers not supported")
 	}
-	l.Flags = binary.LittleEndian.Uint16(raw)
-	l.BlendMode = binary.LittleEndian.Uint16(raw[10:])
+
+	l.BlendMode = BlendMode(binary.LittleEndian.Uint16(raw[10:]))
 	l.Opacity = raw[12]
 	l.Name = string(raw[16:])
+
 	return nil
 }
 
@@ -448,43 +545,6 @@ type Tag struct {
 	Repeat        uint16
 	LoopDirection uint8
 	UserData
-}
-
-func makeCelImage8(f *Aseprite, bounds image.Rectangle, opacity byte, pix []byte) Cel {
-	img := image.Paletted{
-		Pix:     pix,
-		Stride:  bounds.Dx(),
-		Rect:    bounds,
-		Palette: f.Palette,
-	}
-	return Cel{Image: &img}
-}
-func makeCelImage16(f *Aseprite, bounds image.Rectangle, opacity byte, pix []byte) Cel {
-	img := image.NewNRGBA(bounds)
-	stride := bounds.Dx() * 2
-	for y := bounds.Min.Y; y < bounds.Max.Y; y++ {
-		for x := bounds.Min.X; x < bounds.Max.X; x++ {
-			i := (y-bounds.Min.Y)*stride + (x-bounds.Min.X)*2
-			grayValue := pix[i]
-			alphaValue := pix[i+1]
-			finalAlpha := uint16(alphaValue) * uint16(opacity) / 255
-			img.SetNRGBA(x, y, color.NRGBA{
-				R: grayValue,
-				G: grayValue,
-				B: grayValue,
-				A: byte(finalAlpha),
-			})
-		}
-	}
-	return Cel{Image: img}
-}
-func makeCelImage32(f *Aseprite, bounds image.Rectangle, opacity byte, pix []byte) Cel {
-	img := image.NRGBA{
-		Pix:    pix,
-		Stride: bounds.Dx() * 4,
-		Rect:   bounds,
-	}
-	return Cel{Image: &img}
 }
 
 func expandSliceKey(slice *Slice, lenFrames int, frameIndices []int) {
@@ -527,4 +587,64 @@ func factorPowerOfTwo(n int) (a, b int) {
 	a = 1 << (x - x/2)
 	b = 1 << (x / 2)
 	return
+}
+
+func isVisibleLayer(layerFlags uint16) bool {
+	return layerFlags&1 != 0
+}
+
+// func isEditableLayer(layerFlags uint16) bool {
+// 	return layerFlags&2 != 0
+// }
+
+// func isLockMovementLayer(layerFlags uint16) bool {
+// 	return layerFlags&4 != 0
+// }
+
+// func isBackgroundLayer(layerFlags uint16) bool {
+// 	return layerFlags&8 != 0
+// }
+
+// func isLinkedCelsLayer(layerFlags uint16) bool {
+// 	return layerFlags&16 != 0
+// }
+
+// func isCollapsedLayer(layerFlags uint16) bool {
+// 	return layerFlags&32 != 0
+// }
+
+func isReferenceLayer(layerFlags uint16) bool {
+	return layerFlags&64 != 0
+}
+
+func Read(filepath string) (a Ase, err error) {
+	file, err := os.Open(filepath)
+	if err != nil {
+		return a, err
+	}
+	defer file.Close()
+
+	_, err = a.parse(file)
+
+	if err != nil {
+		return a, err
+	}
+
+	return a, nil
+}
+
+func ReadFs(f fs.FS, filepath string) (a Ase, err error) {
+	file, err := f.Open(filepath)
+	if err != nil {
+		return a, err
+	}
+	defer file.Close()
+
+	_, err = a.parse(file)
+
+	if err != nil {
+		return a, err
+	}
+
+	return a, nil
 }
