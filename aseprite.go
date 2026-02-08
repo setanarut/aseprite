@@ -21,9 +21,13 @@ type LoopDirection uint8
 type Bpp uint16
 
 const (
-	NRGBA     Bpp = 32
-	Grayscale Bpp = 16 // NRGBA for standart image package
-	Indexed   Bpp = 8
+	// This mode is parsed as image.NRGBA images.
+	NRGBA Bpp = 32
+	// The standard image.Gray/Gray16 does not support the alpha channel;
+	// his mode is parsed as image.NRGBA images.
+	Grayscale Bpp = 16
+	// This mode is parsed as image.Paletted images.
+	Indexed Bpp = 8
 )
 
 const (
@@ -60,15 +64,24 @@ type userDataReceiver interface {
 }
 
 type Ase struct {
-	Width                   int // Canvas width
-	Height                  int // Canvas height
-	ColorDepth              Bpp
-	TransparentPaletteIndex uint8
-	Palette                 color.Palette
-	Frames                  []Frame
-	Layers                  []Layer
-	Slices                  []Slice
-	Tags                    []Tag
+	ColorDepth Bpp
+	// Canvas width
+	Width int
+	// Canvas height
+	Height int
+	// Timeline frames containing layer cells
+	Frames []Frame
+	// Visible Layer datas. Layer indices increase from bottom to top.
+	Layers []Layer
+	// Aseprite slices. https://www.aseprite.org/api/slice#slice
+	Slices []Slice
+	// Timeline animation tags
+	Tags []Tag
+
+	// Palette entry for used as transparent color in each layer. (only for indexed images)
+	Transparent uint8
+	// Palette of file. (only for indexed images)
+	Palette color.Palette
 
 	// flags uint16
 }
@@ -90,7 +103,7 @@ func (a *Ase) parse(r io.Reader) (filesize int64, err error) {
 	a.Height = int(binary.LittleEndian.Uint16(hdr[10:]))
 	a.ColorDepth = Bpp(binary.LittleEndian.Uint16(hdr[12:]))
 	// a.flags = binary.LittleEndian.Uint16(hdr[14:])
-	a.TransparentPaletteIndex = hdr[28]
+	a.Transparent = hdr[28]
 	paletteSize := binary.LittleEndian.Uint16(hdr[32:])
 	a.Palette = make(color.Palette, paletteSize)
 	a.Frames = make([]Frame, 0, totalFrames)
@@ -98,7 +111,7 @@ func (a *Ase) parse(r io.Reader) (filesize int64, err error) {
 	for i := range a.Palette {
 		a.Palette[i] = color.Black
 	}
-	a.Palette[a.TransparentPaletteIndex] = color.Transparent
+	a.Palette[a.Transparent] = color.Transparent
 	chunkHeaderBuf := make([]byte, 6)
 	frameHeaderBuf := make([]byte, 16)
 	currentOffset := int64(128)
@@ -118,7 +131,7 @@ func (a *Ase) parse(r io.Reader) (filesize int64, err error) {
 			nchunks = int(oldChunks)
 		}
 		currentFrame := Frame{
-			Dur: time.Millisecond * time.Duration(durationMS),
+			Duration: time.Millisecond * time.Duration(durationMS),
 		}
 		if len(a.Layers) > 0 {
 			currentFrame.Cels = make([]Cel, len(a.Layers))
@@ -147,7 +160,7 @@ func (a *Ase) parse(r io.Reader) (filesize int64, err error) {
 			switch chunkType {
 			case 0x2004:
 				var l Layer
-				if err := l.Parse(chunkData); err != nil {
+				if err := l.parse(chunkData); err != nil {
 					return currentOffset, err
 				}
 				a.Layers = append(a.Layers, l)
@@ -268,7 +281,7 @@ func (a *Ase) parseSlice(raw []byte, totalFrames int) Slice {
 			cw := binary.LittleEndian.Uint32(raw[8:])
 			ch := binary.LittleEndian.Uint32(raw[12:])
 			raw = raw[16:]
-			key.Center = image.Rect(int(cx), int(cy), int(cx)+int(cw), int(cy)+int(ch))
+			key.Rect9Slices = image.Rect(int(cx), int(cy), int(cx)+int(cw), int(cy)+int(ch))
 		}
 		if flags&2 != 0 {
 			px := int32(binary.LittleEndian.Uint32(raw))
@@ -289,8 +302,8 @@ func (a *Ase) parseTags(raw []byte) []Tag {
 	ptr := raw[10:]
 	for i := range ntags {
 		t := &tags[i]
-		t.Lo = binary.LittleEndian.Uint16(ptr)
-		t.Hi = binary.LittleEndian.Uint16(ptr[2:])
+		t.Start = binary.LittleEndian.Uint16(ptr)
+		t.End = binary.LittleEndian.Uint16(ptr[2:])
 		t.LoopDirection = LoopDirection(ptr[4])
 		t.Repeat = binary.LittleEndian.Uint16(ptr[5:])
 		nameLen := binary.LittleEndian.Uint16(ptr[17:])
@@ -512,26 +525,38 @@ func (a *Ase) buildLayerUserDataText() [][]byte {
 }
 
 type Frame struct {
-	Dur  time.Duration
+	// Duration of this frame in the animation
+	Duration time.Duration
+	// Cels in this frame, ordered by layer index. The indexes are layer indexes that increase from bottom to top.
+	//
+	// Invisible layers are ignored during Aseprite file parsing.
 	Cels []Cel
 }
 
 type SliceFrame struct {
+	// The bounds of the slice in the canvas
 	Bounds image.Rectangle
-	Center image.Rectangle
-	Pivot  image.Point
+	// 9-slices internal rectangle (relative to slice bounds)
+	Rect9Slices image.Rectangle
+	// A pivot to specify the central/base location. (relative to slice bounds)
+	Pivot image.Point
 }
 
 type Slice struct {
+	UserData
 	Name   string
 	Frames []SliceFrame
-	UserData
 }
 
+// A cel is an image in a specific xy-coordinate, and a specific layer/frame combination.
 type Cel struct {
-	Image   image.Image
-	Opacity uint8
 	UserData
+	// Cel image (Image.Bounds are the cel image boundaries within the Aseprite canvas).
+	//
+	// `Cel.Image.Bounds().Min` is the top-left position of the Cel image within the canvas. (It is not always zero).
+	Image image.Image
+	// Cel opacity. (0-255)
+	Opacity uint8
 }
 
 func (c *Cel) setUserData(text string, col color.NRGBA) {
@@ -540,16 +565,16 @@ func (c *Cel) setUserData(text string, col color.NRGBA) {
 }
 
 type Layer struct {
-	Name string
-
-	BlendMode BlendMode
-	Opacity   uint8
 	UserData
+	// Layer name.
+	Name string
+	// Blending mode of this layer.
+	BlendMode BlendMode
+	// Layer opacity. (0-255)
+	Opacity uint8
 
-	Visible bool
-
-	flags uint16
-
+	visible bool
+	flags   uint16
 	// 0=Normal (Image), 1=Group, 2=Tilemap
 	layerType uint16
 }
@@ -559,24 +584,20 @@ func (l *Layer) setUserData(text string, col color.NRGBA) {
 	l.Color = col
 }
 
-func (l *Layer) Parse(raw []byte) error {
-
+func (l *Layer) parse(raw []byte) error {
 	l.flags = binary.LittleEndian.Uint16(raw)
-
-	l.Visible = isVisibleLayer(l.flags)
-
+	l.visible = isVisibleLayer(l.flags)
 	l.layerType = binary.LittleEndian.Uint16(raw[2:])
 	if l.layerType == 2 {
 		return errors.New("tilemap layers not supported")
 	}
-
 	l.BlendMode = BlendMode(binary.LittleEndian.Uint16(raw[10:]))
 	l.Opacity = raw[12]
 	l.Name = string(raw[16:])
-
 	return nil
 }
 
+// User-defined data
 type UserData struct {
 	Color color.NRGBA
 	Text  string
@@ -587,13 +608,17 @@ func (u *UserData) setUserData(text string, c color.NRGBA) {
 	u.Color = c
 }
 
+// Tag Represents a tag in the timeline.
 type Tag struct {
-	Name          string
-	Lo            uint16
-	Hi            uint16
+	UserData
+	Name string
+	// Frame index where this tag starts.
+	Start uint16
+	// Frame index where this tag ends.
+	End uint16
+	// Play this animation section N times, 0 means infinite.
 	Repeat        uint16
 	LoopDirection LoopDirection
-	UserData
 }
 
 func expandSliceKey(slice *Slice, lenFrames int, frameIndices []int) {
