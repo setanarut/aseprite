@@ -9,8 +9,16 @@ import (
 func main() {
 	ase, _ := aseprite.Read("test.ase")
 
-	fmt.Println(ase.ColorDepth)
-	fmt.Println(ase.Tags)
-	fmt.Println(ase.Frames[0].Cels[0].Image.Bounds())
-	fmt.Println(ase.Frames[0].Cels[0].Opacity)
+	for _, tag := range ase.Tags {
+		fmt.Println(tag.Name, tag.UserData)
+	}
+
+	for _, l := range ase.Layers {
+		fmt.Println(l.Name, l.UserData)
+	}
+
+	for _, c := range ase.Frames[0].Cels {
+		fmt.Println(c)
+	}
+
 }

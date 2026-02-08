@@ -15,6 +15,7 @@ import (
 )
 
 type BlendMode uint16
+type LoopDirection uint8
 
 // Bit per pixel
 type Bpp uint16
@@ -23,6 +24,13 @@ const (
 	NRGBA     Bpp = 32
 	Grayscale Bpp = 16 // NRGBA for standart image package
 	Indexed   Bpp = 8
+)
+
+const (
+	Forward LoopDirection = iota
+	Reverse
+	PingPong
+	PingPongReverse
 )
 
 const (
@@ -116,6 +124,7 @@ func (a *Ase) parse(r io.Reader) (filesize int64, err error) {
 			currentFrame.Cels = make([]Cel, len(a.Layers))
 		}
 		var lastUserDataTarget userDataReceiver
+		var tagQueue []userDataReceiver
 		for j := 0; j < nchunks; j++ {
 			if _, err := io.ReadFull(r, chunkHeaderBuf); err != nil {
 				return currentOffset, err
@@ -123,6 +132,9 @@ func (a *Ase) parse(r io.Reader) (filesize int64, err error) {
 			currentOffset += 6
 			chunkSize := binary.LittleEndian.Uint32(chunkHeaderBuf[0:])
 			chunkType := binary.LittleEndian.Uint16(chunkHeaderBuf[4:])
+			if chunkType != 0x2020 {
+				tagQueue = nil
+			}
 			dataLen := int(chunkSize) - 6
 			if dataLen < 0 {
 				return currentOffset, errors.New("invalid chunk size")
@@ -174,18 +186,27 @@ func (a *Ase) parse(r io.Reader) (filesize int64, err error) {
 				newTags := a.parseTags(chunkData)
 				startIdx := len(a.Tags)
 				a.Tags = append(a.Tags, newTags...)
-				if len(a.Tags) > startIdx {
-					lastUserDataTarget = &a.Tags[len(a.Tags)-1]
+				for i := range newTags {
+					tagQueue = append(tagQueue, &a.Tags[startIdx+i])
 				}
+				lastUserDataTarget = nil
 			case 0x2022:
 				slice := a.parseSlice(chunkData, totalFrames)
 				a.Slices = append(a.Slices, slice)
 				lastUserDataTarget = &a.Slices[len(a.Slices)-1]
 			case 0x2020:
-				if lastUserDataTarget != nil {
-					data, col := a.parseUserData(chunkData)
-					lastUserDataTarget.setUserData(string(data), col)
+				var target userDataReceiver
+				if len(tagQueue) > 0 {
+					target = tagQueue[0]
+					tagQueue = tagQueue[1:]
+				} else {
+					target = lastUserDataTarget
 				}
+				if target != nil {
+					data, col := a.parseUserData(chunkData)
+					target.setUserData(string(data), col)
+				}
+				lastUserDataTarget = nil
 			default:
 				lastUserDataTarget = nil
 			}
@@ -197,6 +218,28 @@ func (a *Ase) parse(r io.Reader) (filesize int64, err error) {
 		}
 		a.Frames = append(a.Frames, currentFrame)
 	}
+
+	visibleLayers := make([]Layer, 0, len(a.Layers))
+	visibleLayerIndices := make(map[int]struct{})
+	for i, l := range a.Layers {
+		if isVisibleLayer(l.flags) && !isReferenceLayer(l.flags) {
+			visibleLayers = append(visibleLayers, l)
+			visibleLayerIndices[i] = struct{}{}
+		}
+	}
+	a.Layers = visibleLayers
+
+	for i := range a.Frames {
+		frame := &a.Frames[i]
+		newCels := make([]Cel, 0, len(visibleLayers))
+		for j, cel := range frame.Cels {
+			if _, ok := visibleLayerIndices[j]; ok {
+				newCels = append(newCels, cel)
+			}
+		}
+		frame.Cels = newCels
+	}
+
 	return fileSize, nil
 }
 
@@ -248,12 +291,13 @@ func (a *Ase) parseTags(raw []byte) []Tag {
 		t := &tags[i]
 		t.Lo = binary.LittleEndian.Uint16(ptr)
 		t.Hi = binary.LittleEndian.Uint16(ptr[2:])
-		t.LoopDirection = uint8(ptr[4])
+		t.LoopDirection = LoopDirection(ptr[4])
 		t.Repeat = binary.LittleEndian.Uint16(ptr[5:])
 		nameLen := binary.LittleEndian.Uint16(ptr[17:])
 		t.Name = string(ptr[19 : 19+nameLen])
 		ptr = ptr[19+nameLen:]
 	}
+
 	return tags
 }
 
@@ -502,7 +546,10 @@ type Layer struct {
 	Opacity   uint8
 	UserData
 
+	Visible bool
+
 	flags uint16
+
 	// 0=Normal (Image), 1=Group, 2=Tilemap
 	layerType uint16
 }
@@ -515,6 +562,8 @@ func (l *Layer) setUserData(text string, col color.NRGBA) {
 func (l *Layer) Parse(raw []byte) error {
 
 	l.flags = binary.LittleEndian.Uint16(raw)
+
+	l.Visible = isVisibleLayer(l.flags)
 
 	l.layerType = binary.LittleEndian.Uint16(raw[2:])
 	if l.layerType == 2 {
@@ -543,7 +592,7 @@ type Tag struct {
 	Lo            uint16
 	Hi            uint16
 	Repeat        uint16
-	LoopDirection uint8
+	LoopDirection LoopDirection
 	UserData
 }
 
