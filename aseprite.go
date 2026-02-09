@@ -1,4 +1,7 @@
+// Aseprite file parser/decoder
 package aseprite
+
+//go:generate stringer -type=LayerType,BlendMode,ColorDepth,LoopDirection -output=type_string.go
 
 import (
 	"bytes"
@@ -15,19 +18,15 @@ import (
 )
 
 type BlendMode uint16
+type LayerType uint16
+type ColorDepth uint16
 type LoopDirection uint8
 
-// Bit per pixel
-type Bpp uint16
-
 const (
-	// This mode is parsed as image.NRGBA images.
-	NRGBA Bpp = 32
-	// The standard image.Gray/Gray16 does not support the alpha channel;
-	// his mode is parsed as image.NRGBA images.
-	Grayscale Bpp = 16
-	// This mode is parsed as image.Paletted images.
-	Indexed Bpp = 8
+	NRGBA ColorDepth = 32
+	// Grayscale mode is parsed as image.NRGBA images.
+	Grayscale ColorDepth = 16
+	Indexed   ColorDepth = 8
 )
 
 const (
@@ -35,6 +34,12 @@ const (
 	Reverse
 	PingPong
 	PingPongReverse
+)
+
+const (
+	Image LayerType = iota
+	Group
+	Tilemap
 )
 
 const (
@@ -64,7 +69,7 @@ type userDataReceiver interface {
 }
 
 type Ase struct {
-	ColorDepth Bpp
+	ColorDepth ColorDepth
 	// Canvas width
 	Width int
 	// Canvas height
@@ -78,15 +83,13 @@ type Ase struct {
 	// Timeline animation tags
 	Tags []Tag
 
-	// Palette entry for used as transparent color in each layer. (only for indexed images)
-	Transparent uint8
+	// Palette index for used as transparent color in each layer. (only for indexed images)
+	TransparentIndex uint8
 	// Palette of file. (only for indexed images)
 	Palette color.Palette
-
-	// flags uint16
 }
 
-func (a *Ase) parse(r io.Reader) (filesize int64, err error) {
+func (a *Ase) parse(r io.Reader, onlyVisible bool) (filesize int64, err error) {
 	var hdr [128]byte
 	if n, err := io.ReadFull(r, hdr[:]); err != nil {
 		return int64(n), err
@@ -101,9 +104,8 @@ func (a *Ase) parse(r io.Reader) (filesize int64, err error) {
 	totalFrames := int(binary.LittleEndian.Uint16(hdr[6:]))
 	a.Width = int(binary.LittleEndian.Uint16(hdr[8:]))
 	a.Height = int(binary.LittleEndian.Uint16(hdr[10:]))
-	a.ColorDepth = Bpp(binary.LittleEndian.Uint16(hdr[12:]))
-	// a.flags = binary.LittleEndian.Uint16(hdr[14:])
-	a.Transparent = hdr[28]
+	a.ColorDepth = ColorDepth(binary.LittleEndian.Uint16(hdr[12:]))
+	a.TransparentIndex = hdr[28]
 	paletteSize := binary.LittleEndian.Uint16(hdr[32:])
 	a.Palette = make(color.Palette, paletteSize)
 	a.Frames = make([]Frame, 0, totalFrames)
@@ -111,10 +113,11 @@ func (a *Ase) parse(r io.Reader) (filesize int64, err error) {
 	for i := range a.Palette {
 		a.Palette[i] = color.Black
 	}
-	a.Palette[a.Transparent] = color.Transparent
+	a.Palette[a.TransparentIndex] = color.Transparent
 	chunkHeaderBuf := make([]byte, 6)
 	frameHeaderBuf := make([]byte, 16)
 	currentOffset := int64(128)
+
 	for range totalFrames {
 		if _, err := io.ReadFull(r, frameHeaderBuf); err != nil {
 			return currentOffset, err
@@ -159,10 +162,7 @@ func (a *Ase) parse(r io.Reader) (filesize int64, err error) {
 			currentOffset += int64(dataLen)
 			switch chunkType {
 			case 0x2004:
-				var l Layer
-				if err := l.parse(chunkData); err != nil {
-					return currentOffset, err
-				}
+				l := a.parseLayer(chunkData)
 				a.Layers = append(a.Layers, l)
 				lastUserDataTarget = &a.Layers[len(a.Layers)-1]
 				if len(currentFrame.Cels) < len(a.Layers) {
@@ -232,21 +232,50 @@ func (a *Ase) parse(r io.Reader) (filesize int64, err error) {
 		a.Frames = append(a.Frames, currentFrame)
 	}
 
-	visibleLayers := make([]Layer, 0, len(a.Layers))
-	visibleLayerIndices := make(map[int]struct{})
+	keptLayers := make([]Layer, 0, len(a.Layers))
+	keptLayerIndices := make(map[int]struct{})
+
+	// Map to track the visibility of each level.
+	// levelVisibility[0] = true means Level 0 (root) is visible.
+	levelVisibility := make(map[uint16]bool)
+
 	for i, l := range a.Layers {
-		if isVisibleLayer(l.flags) && !isReferenceLayer(l.flags) {
-			visibleLayers = append(visibleLayers, l)
-			visibleLayerIndices[i] = struct{}{}
+		// Ignore technical layers
+		if l.Type == 2 || l.IsReference {
+			continue
 		}
+
+		// Determine the "Calculated" visibility of the layer.
+		// For a layer to be visible:
+		// 1. Its own flag must be visible (l.Flags.IsVisible)
+		// 2. If it is a child (Level > 0), the parent level (Level-1) must be visible.
+		parentVisible := true
+		if l.ChildLevel > 0 {
+			if visible, ok := levelVisibility[l.ChildLevel-1]; ok {
+				parentVisible = visible
+			}
+		}
+
+		isEffectiveVisible := l.IsVisible && parentVisible
+
+		// Save the state of this layer to the map.
+		// If this is a group, subsequent children (Level+1) will read this value.
+		levelVisibility[l.ChildLevel] = isEffectiveVisible
+
+		if onlyVisible && !isEffectiveVisible {
+			continue
+		}
+
+		keptLayers = append(keptLayers, l)
+		keptLayerIndices[i] = struct{}{}
 	}
-	a.Layers = visibleLayers
+	a.Layers = keptLayers
 
 	for i := range a.Frames {
 		frame := &a.Frames[i]
-		newCels := make([]Cel, 0, len(visibleLayers))
+		newCels := make([]Cel, 0, len(keptLayers))
 		for j, cel := range frame.Cels {
-			if _, ok := visibleLayerIndices[j]; ok {
+			if _, ok := keptLayerIndices[j]; ok {
 				newCels = append(newCels, cel)
 			}
 		}
@@ -403,6 +432,28 @@ func (a *Ase) parseOldPalette0x0011(raw []byte) {
 	}
 }
 
+// Chunk0x2004
+func (a *Ase) parseLayer(raw []byte) Layer {
+	var l Layer
+
+	flags := binary.LittleEndian.Uint16(raw)
+	l.IsVisible = flags&1 != 0
+	l.IsLocked = flags&2 != 0
+	// l.IsLocked = flags&4 != 0
+	l.IsBackground = flags&8 != 0
+	l.PreferLinkedCels = flags&16 != 0
+	l.IsCollapsed = flags&32 != 0
+	l.IsReference = flags&64 != 0
+
+	l.Type = LayerType(binary.LittleEndian.Uint16(raw[2:]))
+	l.ChildLevel = binary.LittleEndian.Uint16(raw[4:]) // Level verisini oku
+	l.BlendMode = BlendMode(binary.LittleEndian.Uint16(raw[10:]))
+	l.Opacity = raw[12]
+	l.Name = parseString(raw[16:])
+
+	return l
+}
+
 // Chunk0x2005
 func (a *Ase) parseCel(raw []byte, layerIdx int) (*Cel, error) {
 
@@ -418,7 +469,7 @@ func (a *Ase) parseCel(raw []byte, layerIdx int) (*Cel, error) {
 	}
 	layer := &a.Layers[layerIdx]
 
-	if !isVisibleLayer(layer.flags) || isReferenceLayer(layer.flags) {
+	if layer.IsReference || layer.Type == 2 {
 		return nil, nil
 	}
 	raw = raw[16:]
@@ -500,7 +551,7 @@ func (a *Ase) parseCel(raw []byte, layerIdx int) (*Cel, error) {
 func (a *Ase) buildUserDataText() []byte {
 	n := 0
 	for _, l := range a.Layers {
-		if isVisibleLayer(l.flags) {
+		if l.IsVisible {
 			n += len(l.Text)
 		}
 	}
@@ -515,7 +566,7 @@ func (a *Ase) buildLayerUserDataText() [][]byte {
 	userdataText := a.buildUserDataText()
 	ld := make([][]byte, 0, len(a.Layers))
 	for _, l := range a.Layers {
-		if isVisibleLayer(l.flags) && len(l.Text) > 0 {
+		if l.IsVisible && len(l.Text) > 0 {
 			ofs := len(userdataText)
 			userdataText = append(userdataText, l.Text...)
 			ld = append(ld, userdataText[ofs:])
@@ -559,13 +610,28 @@ type Cel struct {
 	Opacity uint8
 }
 
+// IsEmpty checks if the Cel is empty (has no image).
+func (c *Cel) IsEmpty() bool {
+	return c.Image == nil
+}
+
 func (c *Cel) setUserData(text string, col color.NRGBA) {
 	c.Text = text
 	c.Color = col
 }
 
+type LayerFlags struct {
+	IsVisible        bool
+	IsLocked         bool
+	IsBackground     bool
+	PreferLinkedCels bool
+	IsCollapsed      bool
+	IsReference      bool
+}
+
 type Layer struct {
 	UserData
+	Type LayerType
 	// Layer name.
 	Name string
 	// Blending mode of this layer.
@@ -573,28 +639,13 @@ type Layer struct {
 	// Layer opacity. (0-255)
 	Opacity uint8
 
-	visible bool
-	flags   uint16
-	// 0=Normal (Image), 1=Group, 2=Tilemap
-	layerType uint16
+	LayerFlags
+	ChildLevel uint16
 }
 
 func (l *Layer) setUserData(text string, col color.NRGBA) {
 	l.Text = text
 	l.Color = col
-}
-
-func (l *Layer) parse(raw []byte) error {
-	l.flags = binary.LittleEndian.Uint16(raw)
-	l.visible = isVisibleLayer(l.flags)
-	l.layerType = binary.LittleEndian.Uint16(raw[2:])
-	if l.layerType == 2 {
-		return errors.New("tilemap layers not supported")
-	}
-	l.BlendMode = BlendMode(binary.LittleEndian.Uint16(raw[10:]))
-	l.Opacity = raw[12]
-	l.Name = string(raw[16:])
-	return nil
 }
 
 // User-defined data
@@ -663,42 +714,14 @@ func factorPowerOfTwo(n int) (a, b int) {
 	return
 }
 
-func isVisibleLayer(layerFlags uint16) bool {
-	return layerFlags&1 != 0
-}
-
-// func isEditableLayer(layerFlags uint16) bool {
-// 	return layerFlags&2 != 0
-// }
-
-// func isLockMovementLayer(layerFlags uint16) bool {
-// 	return layerFlags&4 != 0
-// }
-
-// func isBackgroundLayer(layerFlags uint16) bool {
-// 	return layerFlags&8 != 0
-// }
-
-// func isLinkedCelsLayer(layerFlags uint16) bool {
-// 	return layerFlags&16 != 0
-// }
-
-// func isCollapsedLayer(layerFlags uint16) bool {
-// 	return layerFlags&32 != 0
-// }
-
-func isReferenceLayer(layerFlags uint16) bool {
-	return layerFlags&64 != 0
-}
-
-func Read(filepath string) (a Ase, err error) {
+func Read(filepath string, onlyVisibleLayers bool) (a Ase, err error) {
 	file, err := os.Open(filepath)
 	if err != nil {
 		return a, err
 	}
 	defer file.Close()
 
-	_, err = a.parse(file)
+	_, err = a.parse(file, onlyVisibleLayers)
 
 	if err != nil {
 		return a, err
@@ -707,14 +730,14 @@ func Read(filepath string) (a Ase, err error) {
 	return a, nil
 }
 
-func ReadFs(f fs.FS, filepath string) (a Ase, err error) {
+func ReadFs(f fs.FS, filepath string, onlyVisibleLayers bool) (a Ase, err error) {
 	file, err := f.Open(filepath)
 	if err != nil {
 		return a, err
 	}
 	defer file.Close()
 
-	_, err = a.parse(file)
+	_, err = a.parse(file, onlyVisibleLayers)
 
 	if err != nil {
 		return a, err
