@@ -1,14 +1,14 @@
+[![GoDoc](https://godoc.org/github.com/setanarut/aseprite?status.svg)](https://pkg.go.dev/github.com/setanarut/aseprite)
+
 # aseprite
 
-Aseprite file parser
+Aseprite file parser/decoder in Go
 
-```Go
+```shell
 go get github.com/setanarut/aseprite@latest
 ```
 
-1. Invisible layers are not parsed.
-2. Layer indices are ordered from bottom to top.
-3. Layers are not flattened, but this can be done with external Go image processing packages. The opacity and blending mode information of each visible layer and Cel is available.
+Layers are not flattened, but this can be done with external Go image processing packages. The opacity and blending mode information of each  layer and Cel is available.
 
 ## Chunk Types
 

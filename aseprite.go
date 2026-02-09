@@ -629,6 +629,7 @@ type LayerFlags struct {
 	IsReference      bool
 }
 
+// Layer data
 type Layer struct {
 	UserData
 	Type LayerType
