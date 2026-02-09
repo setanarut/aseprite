@@ -578,9 +578,7 @@ func (a *Ase) buildLayerUserDataText() [][]byte {
 type Frame struct {
 	// Duration of this frame in the animation
 	Duration time.Duration
-	// Cels in this frame, ordered by layer index. The indexes are layer indexes that increase from bottom to top.
-	//
-	// Invisible layers are ignored during Aseprite file parsing.
+	// Cels in this frame, ordered by layer index and group child level. that increase from bottom to top.
 	Cels []Cel
 }
 
