@@ -76,7 +76,7 @@ type Ase struct {
 	Height int
 	// Timeline frames containing layer cells
 	Frames []Frame
-	// Visible Layer datas. Layer indices increase from bottom to top.
+	// Layer datas. Layer indices increase from bottom to top.
 	Layers []Layer
 	// Aseprite slices. https://www.aseprite.org/api/slice#slice
 	Slices []Slice
