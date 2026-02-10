@@ -241,7 +241,7 @@ func (a *Ase) parse(r io.Reader, onlyVisible bool) (filesize int64, err error) {
 
 	for i, l := range a.Layers {
 		// Ignore technical layers
-		if l.Type == 2 || l.IsReference {
+		if l.Type == Tilemap {
 			continue
 		}
 
@@ -469,7 +469,7 @@ func (a *Ase) parseCel(raw []byte, layerIdx int) (*Cel, error) {
 	}
 	layer := &a.Layers[layerIdx]
 
-	if layer.IsReference || layer.Type == 2 {
+	if layer.Type == Tilemap {
 		return nil, nil
 	}
 	raw = raw[16:]
