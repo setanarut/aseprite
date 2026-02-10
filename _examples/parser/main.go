@@ -16,7 +16,7 @@ func main() {
 
 	imgio.Save(ase.Tilesets[0].Name+".png", ase.Tilesets[0].Image, imgio.PNGEncoder())
 	cel := ase.GetLayerByName("test tilemap").Cel(0)
-	tmi := cel.GetTilemapImage()
+	tmi := cel.BuildTilemapImage()
 	fmt.Println("tmi rect", tmi.Bounds(), cel.Pos)
 	imgio.Save("tmi.png", tmi, imgio.PNGEncoder())
 
@@ -25,7 +25,7 @@ func main() {
 		fmt.Println("Layer Name:", layer.Name)
 		fmt.Println("LAYER INDEX:", i)
 		fmt.Println("Child level:", layer.ChildLevel)
-		fmt.Println("Layer Type:", layer.Type)
+		fmt.Println("Layer type:", layer.Type)
 		fmt.Println("User data:", layer.UserData)
 		fmt.Println("Is frame 0 empty:", layer.IsCelEmpty(0))
 		switch layer.Type {

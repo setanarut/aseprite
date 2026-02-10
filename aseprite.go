@@ -182,8 +182,8 @@ type Tileset struct {
 	BaseIndex int
 }
 
-// GetTileImage returns tile sub-image
-func (ts *Tileset) GetTileImage(tileID uint32) image.Image {
+// TileImage returns single tile sub-image
+func (ts *Tileset) TileImage(tileID uint32) image.Image {
 	if ts.Image == nil || tileID == 0 {
 		return nil
 	}
@@ -199,12 +199,15 @@ func (ts *Tileset) GetTileImage(tileID uint32) image.Image {
 	return nil
 }
 
-// GetTilemapImage constructs and returns a full image of the tilemap cel
+// BuildTilemapImage() is only for Tilemap layers.
+//
+// Constructs and returns a full image of the tilemap cel
 // by rendering all its tiles using the associated tileset.
-func (c *Cel) GetTilemapImage() image.Image {
-	if c.Type != CompressedTilemap || c.Layer.Tileset == nil {
+func (c *Cel) BuildTilemapImage() image.Image {
+	if c.Layer.Type != Tilemap || c.Type != CompressedTilemap || c.Layer.Tileset == nil {
 		return c.Image
 	}
+
 	ts := c.Layer.Tileset
 	fullWidth := c.Size.X * ts.TileSize.X
 	fullHeight := c.Size.Y * ts.TileSize.Y
@@ -214,7 +217,7 @@ func (c *Cel) GetTilemapImage() image.Image {
 		if tile.ID == 0 {
 			continue
 		}
-		tileImg := ts.GetTileImage(tile.ID)
+		tileImg := ts.TileImage(tile.ID)
 		if tileImg == nil {
 			continue
 		}
@@ -225,27 +228,6 @@ func (c *Cel) GetTilemapImage() image.Image {
 		drawTile(res, tileImg, posX, posY, tile.XYD)
 	}
 	return res
-}
-
-func drawTile(dst *image.NRGBA, src image.Image, x, y int, flags FlipBitMask) {
-	bounds := src.Bounds()
-	w, h := bounds.Dx(), bounds.Dy()
-	for dy := range h {
-		for dx := range w {
-			sx, sy := dx, dy
-			if flags.IsFlipX() {
-				sx = w - 1 - sx
-			}
-			if flags.IsFlipY() {
-				sy = h - 1 - sy
-			}
-			if flags.IsFlipD() {
-				sx, sy = sy, sx
-			}
-			c := src.At(bounds.Min.X+sx, bounds.Min.Y+sy)
-			dst.Set(x+dx, y+dy, c)
-		}
-	}
 }
 
 func (a *Ase) parse(r io.Reader, onlyVisible bool) (filesize int64, err error) {
@@ -801,7 +783,7 @@ func (a *Ase) parseCel(raw []byte, layerIdx int) (*Cel, error) {
 		}
 
 		// Ayrıştırma bittikten hemen sonra görseli oluştur:
-		cel.Image = cel.GetTilemapImage()
+		cel.Image = cel.BuildTilemapImage()
 
 		return &cel, nil
 
@@ -1091,6 +1073,29 @@ func factorPowerOfTwo(n int) (a, b int) {
 	return
 }
 
+func drawTile(dst *image.NRGBA, src image.Image, x, y int, flags FlipBitMask) {
+	bounds := src.Bounds()
+	w, h := bounds.Dx(), bounds.Dy()
+	for dy := range h {
+		for dx := range w {
+			sx, sy := dx, dy
+			if flags.IsFlipX() {
+				sx = w - 1 - sx
+			}
+			if flags.IsFlipY() {
+				sy = h - 1 - sy
+			}
+			if flags.IsFlipD() {
+				sx, sy = sy, sx
+			}
+			c := src.At(bounds.Min.X+sx, bounds.Min.Y+sy)
+			dst.Set(x+dx, y+dy, c)
+		}
+	}
+}
+
+// Read opens and parses an Aseprite file from the given filepath,
+// optionally filtering to visible layers only
 func Read(filepath string, onlyVisibleLayers bool) (a Ase, err error) {
 	file, err := os.Open(filepath)
 	if err != nil {
@@ -1107,6 +1112,8 @@ func Read(filepath string, onlyVisibleLayers bool) (a Ase, err error) {
 	return a, nil
 }
 
+// ReadFs opens and parses an Aseprite file from a virtual filesystem,
+// optionally filtering to visible layers only
 func ReadFs(f fs.FS, filepath string, onlyVisibleLayers bool) (a Ase, err error) {
 	file, err := f.Open(filepath)
 	if err != nil {

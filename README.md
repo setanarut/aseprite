@@ -4,11 +4,8 @@
 
 Aseprite file parser/decoder in Go
 
-```shell
-go get github.com/setanarut/aseprite@latest
-```
+Layers are not flattened, but this can be done with external Go image processing packages. The opacity and blending mode information of each layer and Cel is available. See [quick example](_examples/parser/main.go).
 
-Layers are not flattened, but this can be done with external Go image processing packages. The opacity and blending mode information of each layer and Cel is available.
 
 ## Chunk Types
 
