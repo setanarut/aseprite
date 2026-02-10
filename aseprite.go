@@ -1,7 +1,7 @@
 // Aseprite file parser/decoder
 package aseprite
 
-//go:generate stringer -type=LayerType,BlendMode,ColorDepth,LoopDirection -output=type_string.go
+//go:generate stringer -type=LayerType,BlendMode,ColorDepth,LoopDirection,CelType,FlipBitMask -output=type_string.go
 
 import (
 	"bytes"
@@ -20,7 +20,33 @@ import (
 type BlendMode uint16
 type LayerType uint16
 type ColorDepth uint16
+type CelType uint16
 type LoopDirection uint8
+type FlipBitMask uint8
+
+const (
+	//Bitmask for X flip
+	FlipX FlipBitMask = 1 << iota
+	// Bitmask for Y flip
+	FlipY
+	// Bitmask for diagonal flip (swap X/Y axis)
+	FlipD
+)
+
+// is Y flip
+func (f FlipBitMask) IsFlipX() bool {
+	return f&FlipX != 0
+}
+
+// is X flip
+func (f FlipBitMask) IsFlipY() bool {
+	return f&FlipY != 0
+}
+
+// is diagonal flip (swap X/Y axis)
+func (f FlipBitMask) IsFlipD() bool {
+	return f&FlipD != 0
+}
 
 const (
 	NRGBA ColorDepth = 32
@@ -40,6 +66,13 @@ const (
 	Image LayerType = iota
 	Group
 	Tilemap
+)
+
+const (
+	RawUncompressed CelType = iota
+	LinkedCel
+	CompressedImage
+	CompressedTilemap
 )
 
 const (
@@ -70,14 +103,13 @@ type userDataReceiver interface {
 
 type Ase struct {
 	ColorDepth ColorDepth
-	// Canvas width
-	Width int
-	// Canvas height
-	Height int
-	// Timeline frames containing layer cells
+
+	// Canvas size (width and height)
+	Size image.Point
+	// Timeline frames containing layer Cels
 	Frames []Frame
 	// Layer datas. Layer indices increase from bottom to top.
-	Layers []Layer
+	Layers []*Layer
 	// Aseprite slices. https://www.aseprite.org/api/slice#slice
 	Slices []Slice
 	// Timeline animation tags
@@ -87,6 +119,24 @@ type Ase struct {
 	TransparentIndex uint8
 	// Palette of file. (only for indexed images)
 	Palette color.Palette
+
+	// Tilesets used in Tilemap layers
+	Tilesets []*Tileset
+}
+
+// Tileset represents a set of tiles defined in the .ase file (Chunk 0x2023)
+type Tileset struct {
+	ID        uint32
+	Flags     uint32
+	NumTiles  int
+	BaseIndex int // Index to show in the UI (usually 1)
+	TileSize  image.Point
+	Name      string
+	// External file data (Present if Flags & 1 is set)
+	ExternalFileID    uint32
+	ExternalTilesetID uint32
+	// Tileset image containing all tiles vertically (Present if Flags & 2 is set)
+	Image image.Image
 }
 
 func (a *Ase) parse(r io.Reader, onlyVisible bool) (filesize int64, err error) {
@@ -102,8 +152,8 @@ func (a *Ase) parse(r io.Reader, onlyVisible bool) (filesize int64, err error) {
 	}
 	fileSize := int64(binary.LittleEndian.Uint32(hdr[:]))
 	totalFrames := int(binary.LittleEndian.Uint16(hdr[6:]))
-	a.Width = int(binary.LittleEndian.Uint16(hdr[8:]))
-	a.Height = int(binary.LittleEndian.Uint16(hdr[10:]))
+	a.Size.X = int(binary.LittleEndian.Uint16(hdr[8:]))
+	a.Size.Y = int(binary.LittleEndian.Uint16(hdr[10:]))
 	a.ColorDepth = ColorDepth(binary.LittleEndian.Uint16(hdr[12:]))
 	a.TransparentIndex = hdr[28]
 	paletteSize := binary.LittleEndian.Uint16(hdr[32:])
@@ -137,7 +187,7 @@ func (a *Ase) parse(r io.Reader, onlyVisible bool) (filesize int64, err error) {
 			Duration: time.Millisecond * time.Duration(durationMS),
 		}
 		if len(a.Layers) > 0 {
-			currentFrame.Cels = make([]Cel, len(a.Layers))
+			currentFrame.Cels = make([]*Cel, len(a.Layers))
 		}
 		var lastUserDataTarget userDataReceiver
 		var tagQueue []userDataReceiver
@@ -163,10 +213,10 @@ func (a *Ase) parse(r io.Reader, onlyVisible bool) (filesize int64, err error) {
 			switch chunkType {
 			case 0x2004:
 				l := a.parseLayer(chunkData)
-				a.Layers = append(a.Layers, l)
-				lastUserDataTarget = &a.Layers[len(a.Layers)-1]
+				a.Layers = append(a.Layers, &l)
+				lastUserDataTarget = a.Layers[len(a.Layers)-1]
 				if len(currentFrame.Cels) < len(a.Layers) {
-					newCels := make([]Cel, len(a.Layers))
+					newCels := make([]*Cel, len(a.Layers))
 					copy(newCels, currentFrame.Cels)
 					currentFrame.Cels = newCels
 				}
@@ -174,7 +224,7 @@ func (a *Ase) parse(r io.Reader, onlyVisible bool) (filesize int64, err error) {
 				layerIdx := int(binary.LittleEndian.Uint16(chunkData))
 				if layerIdx >= len(currentFrame.Cels) {
 					newSize := max(len(a.Layers), layerIdx+1)
-					newCels := make([]Cel, newSize)
+					newCels := make([]*Cel, newSize)
 					copy(newCels, currentFrame.Cels)
 					currentFrame.Cels = newCels
 				}
@@ -183,8 +233,8 @@ func (a *Ase) parse(r io.Reader, onlyVisible bool) (filesize int64, err error) {
 					return currentOffset, err
 				}
 				if cel != nil {
-					currentFrame.Cels[layerIdx] = *cel
-					lastUserDataTarget = &currentFrame.Cels[layerIdx]
+					currentFrame.Cels[layerIdx] = cel
+					lastUserDataTarget = currentFrame.Cels[layerIdx]
 				}
 			case 0x2019:
 				a.parsePalette(chunkData)
@@ -207,6 +257,12 @@ func (a *Ase) parse(r io.Reader, onlyVisible bool) (filesize int64, err error) {
 				slice := a.parseSlice(chunkData, totalFrames)
 				a.Slices = append(a.Slices, slice)
 				lastUserDataTarget = &a.Slices[len(a.Slices)-1]
+			case 0x2023:
+				ts, err := a.parseTileset(chunkData)
+				if err != nil {
+					return currentOffset, err
+				}
+				a.Tilesets = append(a.Tilesets, &ts)
 			case 0x2020:
 				var target userDataReceiver
 				if len(tagQueue) > 0 {
@@ -225,14 +281,14 @@ func (a *Ase) parse(r io.Reader, onlyVisible bool) (filesize int64, err error) {
 			}
 		}
 		if len(currentFrame.Cels) < len(a.Layers) {
-			newCels := make([]Cel, len(a.Layers))
+			newCels := make([]*Cel, len(a.Layers))
 			copy(newCels, currentFrame.Cels)
 			currentFrame.Cels = newCels
 		}
 		a.Frames = append(a.Frames, currentFrame)
 	}
 
-	keptLayers := make([]Layer, 0, len(a.Layers))
+	keptLayers := make([]*Layer, 0, len(a.Layers))
 	keptLayerIndices := make(map[int]struct{})
 
 	// Map to track the visibility of each level.
@@ -241,9 +297,9 @@ func (a *Ase) parse(r io.Reader, onlyVisible bool) (filesize int64, err error) {
 
 	for i, l := range a.Layers {
 		// Ignore technical layers
-		if l.Type == Tilemap {
-			continue
-		}
+		// if l.Type == Tilemap {
+		// 	continue
+		// }
 
 		// Determine the "Calculated" visibility of the layer.
 		// For a layer to be visible:
@@ -273,7 +329,7 @@ func (a *Ase) parse(r io.Reader, onlyVisible bool) (filesize int64, err error) {
 
 	for i := range a.Frames {
 		frame := &a.Frames[i]
-		newCels := make([]Cel, 0, len(keptLayers))
+		newCels := make([]*Cel, 0, len(keptLayers))
 		for j, cel := range frame.Cels {
 			if _, ok := keptLayerIndices[j]; ok {
 				newCels = append(newCels, cel)
@@ -282,7 +338,108 @@ func (a *Ase) parse(r io.Reader, onlyVisible bool) (filesize int64, err error) {
 		frame.Cels = newCels
 	}
 
+	for _, lyr := range a.Layers {
+		if lyr.Type == Tilemap {
+			lyr.Tileset = a.Tilesets[lyr.TilesetIndex]
+		}
+	}
+
 	return fileSize, nil
+}
+
+// Chunk0x2023
+func (a *Ase) parseTileset(raw []byte) (Tileset, error) {
+	var ts Tileset
+	if len(raw) < 32 {
+		return ts, errors.New("tileset chunk too small")
+	}
+
+	ts.ID = binary.LittleEndian.Uint32(raw[0:])
+	ts.Flags = binary.LittleEndian.Uint32(raw[4:])
+	ts.NumTiles = int(binary.LittleEndian.Uint32(raw[8:]))
+	ts.TileSize.X = int(binary.LittleEndian.Uint16(raw[12:]))
+	ts.TileSize.Y = int(binary.LittleEndian.Uint16(raw[14:]))
+	ts.BaseIndex = int(int16(binary.LittleEndian.Uint16(raw[16:])))
+
+	// 14 bytes reserved: raw[18:32] skipped
+
+	raw = raw[32:]
+
+	// Parse Name
+	ts.Name = parseString(raw)
+	nameLen := binary.LittleEndian.Uint16(raw)
+	raw = raw[2+nameLen:]
+
+	// External File (Flag 1)
+	if ts.Flags&1 != 0 {
+		if len(raw) < 8 {
+			return ts, errors.New("invalid tileset external info")
+		}
+		ts.ExternalFileID = binary.LittleEndian.Uint32(raw[0:])
+		ts.ExternalTilesetID = binary.LittleEndian.Uint32(raw[4:])
+		raw = raw[8:]
+	}
+
+	// Compressed Tileset Image (Flag 2)
+	if ts.Flags&2 != 0 {
+		if len(raw) < 4 {
+			return ts, errors.New("invalid tileset image length")
+		}
+		raw = raw[4:]
+
+		zr, err := zlib.NewReader(bytes.NewReader(raw))
+		if err != nil {
+			return ts, err
+		}
+		defer zr.Close()
+
+		pix, err := io.ReadAll(zr)
+		if err != nil {
+			return ts, err
+		}
+
+		// Tileset image rect
+		tilesetBounds := image.Rect(0, 0, ts.TileSize.X, ts.TileSize.Y*ts.NumTiles)
+
+		switch a.ColorDepth {
+		case Indexed:
+			ts.Image = &image.Paletted{
+				Pix:     pix,
+				Stride:  tilesetBounds.Dx(),
+				Rect:    tilesetBounds,
+				Palette: a.Palette,
+			}
+		case Grayscale:
+			nrgba := image.NewNRGBA(tilesetBounds)
+			stride := tilesetBounds.Dx() * 2
+			for y := 0; y < tilesetBounds.Dy(); y++ {
+				for x := 0; x < tilesetBounds.Dx(); x++ {
+					i := y*stride + x*2
+					if i+1 < len(pix) {
+						grayValue := pix[i]
+						alphaValue := pix[i+1]
+						nrgba.SetNRGBA(x, y, color.NRGBA{
+							R: grayValue,
+							G: grayValue,
+							B: grayValue,
+							A: alphaValue,
+						})
+					}
+				}
+			}
+			ts.Image = nrgba
+		case NRGBA:
+			ts.Image = &image.NRGBA{
+				Pix:    pix,
+				Stride: tilesetBounds.Dx() * 4,
+				Rect:   tilesetBounds,
+			}
+		default:
+			return ts, errors.New("invalid color depth for tileset")
+		}
+	}
+
+	return ts, nil
 }
 
 // Chunk0x2022
@@ -446,108 +603,165 @@ func (a *Ase) parseLayer(raw []byte) Layer {
 	l.IsReference = flags&64 != 0
 
 	l.Type = LayerType(binary.LittleEndian.Uint16(raw[2:]))
-	l.ChildLevel = binary.LittleEndian.Uint16(raw[4:]) // Level verisini oku
+	l.ChildLevel = binary.LittleEndian.Uint16(raw[4:])
 	l.BlendMode = BlendMode(binary.LittleEndian.Uint16(raw[10:]))
 	l.Opacity = raw[12]
-	l.Name = parseString(raw[16:])
 
+	nameStartIndex := 16
+	l.Name = parseString(raw[nameStartIndex:])
+
+	if l.Type == Tilemap {
+		// WORD + string data len
+		nameLen := 2 + int(binary.LittleEndian.Uint16(raw[nameStartIndex:]))
+		tilesetIndexOffset := nameStartIndex + nameLen
+		l.TilesetIndex = binary.LittleEndian.Uint32(raw[tilesetIndexOffset:])
+	}
 	return l
 }
 
 // Chunk0x2005
 func (a *Ase) parseCel(raw []byte, layerIdx int) (*Cel, error) {
-
 	cel := Cel{}
+	cel.LayerIndex = int(binary.LittleEndian.Uint16(raw[0:2]))
+
+	if int(cel.LayerIndex) < len(a.Layers) {
+		cel.Layer = a.Layers[cel.LayerIndex]
+	}
 
 	x := int(int16(binary.LittleEndian.Uint16(raw[2:])))
 	y := int(int16(binary.LittleEndian.Uint16(raw[4:])))
 
+	cel.Pos.X = x
+	cel.Pos.Y = y
 	cel.Opacity = raw[6]
-	celtype := binary.LittleEndian.Uint16(raw[7:])
+	cel.Type = CelType(binary.LittleEndian.Uint16(raw[7:]))
+	cel.ZIndex = int(int16(binary.LittleEndian.Uint16(raw[9:])))
+
 	if layerIdx >= len(a.Layers) {
 		return nil, nil
 	}
-	layer := &a.Layers[layerIdx]
 
-	if layer.Type == Tilemap {
-		return nil, nil
-	}
-	raw = raw[16:]
-	// finalOpacity := byte((int(opacity) * int(layer.Opacity)) / 255)
+	raw = raw[16:] // Cel Header bitti, veriye geçiyoruz
+
 	var pix []byte
-	switch celtype {
-	case 0:
+	cel.Size.X = int(binary.LittleEndian.Uint16(raw))
+	cel.Size.Y = int(binary.LittleEndian.Uint16(raw[2:]))
+
+	switch cel.Type {
+	case RawUncompressed:
 		pix = raw[4:]
-	case 1:
+
+	case LinkedCel:
 		srcFrame := int(binary.LittleEndian.Uint16(raw))
 		if srcFrame < len(a.Frames) && layerIdx < len(a.Frames[srcFrame].Cels) {
 			c := a.Frames[srcFrame].Cels[layerIdx]
-			return &c, nil
+			return c, nil
 		}
 		return nil, nil
-	case 2:
+
+	case CompressedImage:
 		zr, err := zlib.NewReader(bytes.NewReader(raw[4:]))
 		if err != nil {
 			return nil, err
 		}
 		defer zr.Close()
+
 		data, err := io.ReadAll(zr)
 		if err != nil {
 			return nil, err
 		}
 		pix = data
+
+	case CompressedTilemap:
+		bitsPerTile := binary.LittleEndian.Uint16(raw[4:])
+		tileIDMask := binary.LittleEndian.Uint32(raw[6:])
+		xFlipMask := binary.LittleEndian.Uint32(raw[10:])
+		yFlipMask := binary.LittleEndian.Uint32(raw[14:])
+		dFlipMask := binary.LittleEndian.Uint32(raw[18:])
+
+		raw = raw[32:]
+		zr, _ := zlib.NewReader(bytes.NewReader(raw))
+		tileBytes, _ := io.ReadAll(zr)
+
+		bytesPerTile := int(bitsPerTile / 8)
+		numTiles := len(tileBytes) / bytesPerTile
+		cel.Tiles = make([]Tile, numTiles)
+
+		for i := 0; i < numTiles; i++ {
+			start := i * bytesPerTile
+			var rawTile uint32
+
+			if bytesPerTile == 4 {
+				rawTile = binary.LittleEndian.Uint32(tileBytes[start : start+4])
+			} else {
+				rawTile = uint32(binary.LittleEndian.Uint16(tileBytes[start : start+2]))
+			}
+
+			var flags FlipBitMask
+			if (rawTile & xFlipMask) != 0 {
+				flags |= FlipX
+			}
+			if (rawTile & yFlipMask) != 0 {
+				flags |= FlipY
+			}
+			if (rawTile & dFlipMask) != 0 {
+				flags |= FlipD
+			}
+
+			cel.Tiles[i] = Tile{
+				ID:  rawTile & tileIDMask,
+				XYD: flags,
+			}
+		}
+		return &cel, nil
+
 	default:
 		return nil, errors.New("unsupported cel type")
 	}
 
-	w := int(binary.LittleEndian.Uint16(raw))
-	h := int(binary.LittleEndian.Uint16(raw[2:]))
-	bounds := image.Rect(x, y, x+w, y+h)
+	if len(pix) > 0 {
+		bounds := image.Rect(0, 0, cel.Size.X, cel.Size.Y)
+		var img image.Image
 
-	var img image.Image
-
-	switch a.ColorDepth {
-	case 8:
-		img = &image.Paletted{
-			Pix:     pix,
-			Stride:  bounds.Dx(),
-			Rect:    bounds,
-			Palette: a.Palette,
-		}
-	case 16:
-		nrgba := image.NewNRGBA(bounds)
-		stride := bounds.Dx() * 2
-		for y := bounds.Min.Y; y < bounds.Max.Y; y++ {
-			for x := bounds.Min.X; x < bounds.Max.X; x++ {
-				i := (y-bounds.Min.Y)*stride + (x-bounds.Min.X)*2
-				grayValue := pix[i]
-				alphaValue := pix[i+1]
-				// finalAlpha := uint16(alphaValue) * uint16(opacity) / 255
-				nrgba.SetNRGBA(x, y, color.NRGBA{
-					R: grayValue,
-					G: grayValue,
-					B: grayValue,
-					A: alphaValue,
-				})
+		switch a.ColorDepth {
+		case Indexed:
+			img = &image.Paletted{
+				Pix:     pix,
+				Stride:  cel.Size.X,
+				Rect:    bounds,
+				Palette: a.Palette,
 			}
+		case Grayscale:
+			nrgba := image.NewNRGBA(bounds)
+			stride := cel.Size.X * 2
+			for dy := 0; dy < cel.Size.Y; dy++ {
+				for dx := 0; dx < cel.Size.X; dx++ {
+					i := dy*stride + dx*2
+					if i+1 < len(pix) {
+						g := pix[i]
+						al := pix[i+1]
+						nrgba.SetNRGBA(bounds.Min.X+dx, bounds.Min.Y+dy, color.NRGBA{
+							R: g, G: g, B: g, A: al,
+						})
+					}
+				}
+			}
+			img = nrgba
+		case NRGBA:
+			nrgba := &image.NRGBA{
+				Pix:    pix,
+				Stride: cel.Size.X * 4,
+				Rect:   bounds,
+			}
+			img = nrgba
+		default:
+			return nil, errors.New("invalid color depth")
 		}
-		img = nrgba
-	case 32:
-		nrgba := &image.NRGBA{
-			Pix:    pix,
-			Stride: bounds.Dx() * 4,
-			Rect:   bounds,
-		}
-		img = nrgba
-	default:
-		return nil, errors.New("invalid color depth")
+		cel.Image = img
 	}
-
-	cel.Image = img
 
 	return &cel, nil
 }
-
 func (a *Ase) buildUserDataText() []byte {
 	n := 0
 	for _, l := range a.Layers {
@@ -579,7 +793,7 @@ type Frame struct {
 	// Duration of this frame in the animation
 	Duration time.Duration
 	// Cels in this frame, ordered by layer index and group child level. that increase from bottom to top.
-	Cels []Cel
+	Cels []*Cel
 }
 
 type SliceFrame struct {
@@ -599,13 +813,44 @@ type Slice struct {
 
 // A cel is an image in a specific xy-coordinate, and a specific layer/frame combination.
 type Cel struct {
-	UserData
-	// Cel image (Image.Bounds are the cel image boundaries within the Aseprite canvas).
+	// LayerIndex is the raw index of the layer this cel belongs to.
+	LayerIndex int
+
+	// ZIndex defines the display order override.
+	// 0 = default, +N = show N layers forward, -N = show N layers back.
+	ZIndex int
+
+	// Cel position
+	Pos image.Point
+
+	// Cel Width and Cel Height. Pixel unit for Image layers.
 	//
-	// `Cel.Image.Bounds().Min` is the top-left position of the Cel image within the canvas. (It is not always zero).
+	// Number of tiles for Tilemap layers.
+	Size image.Point
+
+	// Cel image
 	Image image.Image
+
 	// Cel opacity. (0-255)
 	Opacity uint8
+
+	// Tiles contains the ID and flip flags for each tile in a tilemap layer.
+	// This is nil for regular image layers.
+	Tiles []Tile
+
+	// UserData contains extra information like text and color associated with the cel.
+	UserData
+
+	// Type specifies if this cel is a Raw Image, Linked Cel, Compressed Image, or Tilemap.
+	Type CelType
+
+	// Layer is a reference to the layer this cel belongs to,
+	Layer *Layer
+}
+
+type Tile struct {
+	ID  uint32      // Tile index
+	XYD FlipBitMask // XYD bitmask flags
 }
 
 // IsEmpty checks if the Cel is empty (has no image).
@@ -640,6 +885,10 @@ type Layer struct {
 
 	LayerFlags
 	ChildLevel uint16
+
+	// Index for Ase.Tilesets[]
+	TilesetIndex uint32
+	Tileset      *Tileset
 }
 
 func (l *Layer) setUserData(text string, col color.NRGBA) {
