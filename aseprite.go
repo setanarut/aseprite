@@ -8,12 +8,14 @@ import (
 	"compress/zlib"
 	"encoding/binary"
 	"errors"
+	"fmt"
 	"image"
 	"image/color"
 	"io"
 	"io/fs"
 	"math"
 	"os"
+	"slices"
 	"time"
 )
 
@@ -124,19 +126,126 @@ type Ase struct {
 	Tilesets []*Tileset
 }
 
+// GetLayerByName returns the first layer with the given name.
+// Returns nil if no layer is found with that name.
+func (a *Ase) GetLayerByName(name string) *Layer {
+	idx := slices.IndexFunc(a.Layers, func(l *Layer) bool {
+		return l.Name == name
+	})
+	if idx == -1 {
+		return nil
+	}
+	return a.Layers[idx]
+}
+
 // Tileset represents a set of tiles defined in the .ase file (Chunk 0x2023)
 type Tileset struct {
-	ID        uint32
-	Flags     uint32
-	NumTiles  int
-	BaseIndex int // Index to show in the UI (usually 1)
-	TileSize  image.Point
-	Name      string
+	// Tileset name
+	Name string
+
+	// Tileset ID
+	ID uint32
+
+	// Tile width/height
+	TileSize image.Point
+
+	NumTiles int
+
+	// Tileset image containing all tiles vertically (Present if Flags & 2 is set)
+	Image image.Image
+
+	// Tileset flags
+	//
+	// 1 - Include link to external file
+	//
+	// 2 - Include tiles inside this file
+	//
+	// 4 - Tilemaps using this tileset use tile ID=0 as empty tile
+	//     (this is the new format). In rare cases this bit is off,
+	//     and the empty tile will be equal to 0xffffffff (used in
+	//     internal versions of Aseprite)
+	//
+	// 8 - Aseprite will try to match modified tiles with their X
+	//     flipped version automatically in Auto mode when using
+	//     this tileset.
+	//
+	// 16 - Same for Y flips
+	//
+	// 32 - Same for D(iagonal) flips
+	Flags uint32
+
 	// External file data (Present if Flags & 1 is set)
 	ExternalFileID    uint32
 	ExternalTilesetID uint32
-	// Tileset image containing all tiles vertically (Present if Flags & 2 is set)
-	Image image.Image
+
+	// Index to show in the UI (usually 1)
+	BaseIndex int
+}
+
+// GetTileImage returns tile sub-image
+func (ts *Tileset) GetTileImage(tileID uint32) image.Image {
+	if ts.Image == nil || tileID == 0 {
+		return nil
+	}
+	y0 := int(tileID) * ts.TileSize.Y
+	y1 := y0 + ts.TileSize.Y
+
+	rect := image.Rect(0, y0, ts.TileSize.X, y1)
+	if img, ok := ts.Image.(interface {
+		SubImage(r image.Rectangle) image.Image
+	}); ok {
+		return img.SubImage(rect)
+	}
+	return nil
+}
+
+// GetTilemapImage constructs and returns a full image of the tilemap cel
+// by rendering all its tiles using the associated tileset.
+func (c *Cel) GetTilemapImage() image.Image {
+	if c.Type != CompressedTilemap || c.Layer.Tileset == nil {
+		return c.Image
+	}
+	ts := c.Layer.Tileset
+	fullWidth := c.Size.X * ts.TileSize.X
+	fullHeight := c.Size.Y * ts.TileSize.Y
+
+	res := image.NewNRGBA(image.Rect(0, 0, fullWidth, fullHeight))
+	for i, tile := range c.Tiles {
+		if tile.ID == 0 {
+			continue
+		}
+		tileImg := ts.GetTileImage(tile.ID)
+		if tileImg == nil {
+			continue
+		}
+		gridX := i % c.Size.X
+		gridY := i / c.Size.X
+		posX := gridX * ts.TileSize.X
+		posY := gridY * ts.TileSize.Y
+		drawTile(res, tileImg, posX, posY, tile.XYD)
+	}
+	return res
+}
+
+func drawTile(dst *image.NRGBA, src image.Image, x, y int, flags FlipBitMask) {
+	bounds := src.Bounds()
+	w, h := bounds.Dx(), bounds.Dy()
+	for dy := range h {
+		for dx := range w {
+			sx, sy := dx, dy
+			if flags.IsFlipX() {
+				sx = w - 1 - sx
+			}
+			if flags.IsFlipY() {
+				sy = h - 1 - sy
+			}
+			if flags.IsFlipD() {
+				sx, sy = sy, sx
+			}
+			c := src.At(bounds.Min.X+sx, bounds.Min.Y+sy)
+			dst.Set(x+dx, y+dy, c)
+		}
+	}
 }
 
 func (a *Ase) parse(r io.Reader, onlyVisible bool) (filesize int64, err error) {
@@ -150,6 +259,7 @@ func (a *Ase) parse(r io.Reader, onlyVisible bool) (filesize int64, err error) {
 	if pixw, pixh := hdr[34], hdr[35]; pixw != pixh {
 		return 128, errors.New("unsupported pixel ratio")
 	}
+
 	fileSize := int64(binary.LittleEndian.Uint32(hdr[:]))
 	totalFrames := int(binary.LittleEndian.Uint16(hdr[6:]))
 	a.Size.X = int(binary.LittleEndian.Uint16(hdr[8:]))
@@ -157,18 +267,21 @@ func (a *Ase) parse(r io.Reader, onlyVisible bool) (filesize int64, err error) {
 	a.ColorDepth = ColorDepth(binary.LittleEndian.Uint16(hdr[12:]))
 	a.TransparentIndex = hdr[28]
 	paletteSize := binary.LittleEndian.Uint16(hdr[32:])
-	a.Palette = make(color.Palette, paletteSize)
-	a.Frames = make([]Frame, 0, totalFrames)
 
+	a.Palette = make(color.Palette, paletteSize)
 	for i := range a.Palette {
 		a.Palette[i] = color.Black
 	}
 	a.Palette[a.TransparentIndex] = color.Transparent
+
+	// Initialize frames slice. Cels are now stored in Layers.
+	a.Frames = make([]Frame, 0, totalFrames)
+
 	chunkHeaderBuf := make([]byte, 6)
 	frameHeaderBuf := make([]byte, 16)
 	currentOffset := int64(128)
 
-	for range totalFrames {
+	for i := range totalFrames {
 		if _, err := io.ReadFull(r, frameHeaderBuf); err != nil {
 			return currentOffset, err
 		}
@@ -176,6 +289,7 @@ func (a *Ase) parse(r io.Reader, onlyVisible bool) (filesize int64, err error) {
 		if magic := binary.LittleEndian.Uint16(frameHeaderBuf[4:]); magic != 0xF1FA {
 			return currentOffset, errors.New("invalid frame magic number")
 		}
+
 		oldChunks := binary.LittleEndian.Uint16(frameHeaderBuf[6:])
 		durationMS := binary.LittleEndian.Uint16(frameHeaderBuf[8:])
 		newChunks := binary.LittleEndian.Uint32(frameHeaderBuf[12:])
@@ -183,14 +297,14 @@ func (a *Ase) parse(r io.Reader, onlyVisible bool) (filesize int64, err error) {
 		if nchunks == 0 {
 			nchunks = int(oldChunks)
 		}
+
 		currentFrame := Frame{
 			Duration: time.Millisecond * time.Duration(durationMS),
 		}
-		if len(a.Layers) > 0 {
-			currentFrame.Cels = make([]*Cel, len(a.Layers))
-		}
+
 		var lastUserDataTarget userDataReceiver
 		var tagQueue []userDataReceiver
+
 		for j := 0; j < nchunks; j++ {
 			if _, err := io.ReadFull(r, chunkHeaderBuf); err != nil {
 				return currentOffset, err
@@ -198,44 +312,43 @@ func (a *Ase) parse(r io.Reader, onlyVisible bool) (filesize int64, err error) {
 			currentOffset += 6
 			chunkSize := binary.LittleEndian.Uint32(chunkHeaderBuf[0:])
 			chunkType := binary.LittleEndian.Uint16(chunkHeaderBuf[4:])
+
 			if chunkType != 0x2020 {
 				tagQueue = nil
 			}
+
 			dataLen := int(chunkSize) - 6
-			if dataLen < 0 {
-				return currentOffset, errors.New("invalid chunk size")
-			}
 			chunkData := make([]byte, dataLen)
 			if _, err := io.ReadFull(r, chunkData); err != nil {
 				return currentOffset, err
 			}
 			currentOffset += int64(dataLen)
+
 			switch chunkType {
-			case 0x2004:
+			case 0x2004: // Layer Chunk
 				l := a.parseLayer(chunkData)
+				l.parent = a
+				l.rawIdx = len(a.Layers)
+				// Pre-allocate Cels slice for the layer to match total frames
+				l.Cels = make([]*Cel, totalFrames)
 				a.Layers = append(a.Layers, &l)
 				lastUserDataTarget = a.Layers[len(a.Layers)-1]
-				if len(currentFrame.Cels) < len(a.Layers) {
-					newCels := make([]*Cel, len(a.Layers))
-					copy(newCels, currentFrame.Cels)
-					currentFrame.Cels = newCels
-				}
-			case 0x2005:
+
+			case 0x2005: // Cel Chunk
 				layerIdx := int(binary.LittleEndian.Uint16(chunkData))
-				if layerIdx >= len(currentFrame.Cels) {
-					newSize := max(len(a.Layers), layerIdx+1)
-					newCels := make([]*Cel, newSize)
-					copy(newCels, currentFrame.Cels)
-					currentFrame.Cels = newCels
-				}
 				cel, err := a.parseCel(chunkData, layerIdx)
 				if err != nil {
 					return currentOffset, err
 				}
 				if cel != nil {
-					currentFrame.Cels[layerIdx] = cel
-					lastUserDataTarget = currentFrame.Cels[layerIdx]
+					// Store cel directly in the layer's frame index
+					if layerIdx < len(a.Layers) {
+						cel.Layer = a.Layers[layerIdx]
+						a.Layers[layerIdx].Cels[i] = cel
+						lastUserDataTarget = cel
+					}
 				}
+
 			case 0x2019:
 				a.parsePalette(chunkData)
 				lastUserDataTarget = nil
@@ -249,8 +362,8 @@ func (a *Ase) parse(r io.Reader, onlyVisible bool) (filesize int64, err error) {
 				newTags := a.parseTags(chunkData)
 				startIdx := len(a.Tags)
 				a.Tags = append(a.Tags, newTags...)
-				for i := range newTags {
-					tagQueue = append(tagQueue, &a.Tags[startIdx+i])
+				for k := range newTags {
+					tagQueue = append(tagQueue, &a.Tags[startIdx+k])
 				}
 				lastUserDataTarget = nil
 			case 0x2022:
@@ -280,31 +393,14 @@ func (a *Ase) parse(r io.Reader, onlyVisible bool) (filesize int64, err error) {
 				lastUserDataTarget = nil
 			}
 		}
-		if len(currentFrame.Cels) < len(a.Layers) {
-			newCels := make([]*Cel, len(a.Layers))
-			copy(newCels, currentFrame.Cels)
-			currentFrame.Cels = newCels
-		}
 		a.Frames = append(a.Frames, currentFrame)
 	}
 
+	// Filter layers based on visibility
 	keptLayers := make([]*Layer, 0, len(a.Layers))
-	keptLayerIndices := make(map[int]struct{})
-
-	// Map to track the visibility of each level.
-	// levelVisibility[0] = true means Level 0 (root) is visible.
 	levelVisibility := make(map[uint16]bool)
 
-	for i, l := range a.Layers {
-		// Ignore technical layers
-		// if l.Type == Tilemap {
-		// 	continue
-		// }
-
-		// Determine the "Calculated" visibility of the layer.
-		// For a layer to be visible:
-		// 1. Its own flag must be visible (l.Flags.IsVisible)
-		// 2. If it is a child (Level > 0), the parent level (Level-1) must be visible.
+	for _, l := range a.Layers {
 		parentVisible := true
 		if l.ChildLevel > 0 {
 			if visible, ok := levelVisibility[l.ChildLevel-1]; ok {
@@ -312,34 +408,19 @@ func (a *Ase) parse(r io.Reader, onlyVisible bool) (filesize int64, err error) {
 			}
 		}
 
-		isEffectiveVisible := l.IsVisible && parentVisible
-
-		// Save the state of this layer to the map.
-		// If this is a group, subsequent children (Level+1) will read this value.
+		isEffectiveVisible := l.Visible && parentVisible
 		levelVisibility[l.ChildLevel] = isEffectiveVisible
 
 		if onlyVisible && !isEffectiveVisible {
 			continue
 		}
-
 		keptLayers = append(keptLayers, l)
-		keptLayerIndices[i] = struct{}{}
 	}
 	a.Layers = keptLayers
 
-	for i := range a.Frames {
-		frame := &a.Frames[i]
-		newCels := make([]*Cel, 0, len(keptLayers))
-		for j, cel := range frame.Cels {
-			if _, ok := keptLayerIndices[j]; ok {
-				newCels = append(newCels, cel)
-			}
-		}
-		frame.Cels = newCels
-	}
-
+	// Link tilesets to layers if they are tilemaps
 	for _, lyr := range a.Layers {
-		if lyr.Type == Tilemap {
+		if lyr.Type == Tilemap && int(lyr.TilesetIndex) < len(a.Tilesets) {
 			lyr.Tileset = a.Tilesets[lyr.TilesetIndex]
 		}
 	}
@@ -594,13 +675,13 @@ func (a *Ase) parseLayer(raw []byte) Layer {
 	var l Layer
 
 	flags := binary.LittleEndian.Uint16(raw)
-	l.IsVisible = flags&1 != 0
-	l.IsLocked = flags&2 != 0
-	// l.IsLocked = flags&4 != 0
-	l.IsBackground = flags&8 != 0
+	l.Visible = flags&1 != 0
+	l.Locked = flags&2 == 0
+	// l.LockMovement = flags&4 != 0 // unused
+	l.Background = flags&8 != 0
 	l.PreferLinkedCels = flags&16 != 0
-	l.IsCollapsed = flags&32 != 0
-	l.IsReference = flags&64 != 0
+	l.GroupCollapsed = flags&32 != 0
+	l.Reference = flags&64 != 0
 
 	l.Type = LayerType(binary.LittleEndian.Uint16(raw[2:]))
 	l.ChildLevel = binary.LittleEndian.Uint16(raw[4:])
@@ -653,9 +734,14 @@ func (a *Ase) parseCel(raw []byte, layerIdx int) (*Cel, error) {
 
 	case LinkedCel:
 		srcFrame := int(binary.LittleEndian.Uint16(raw))
-		if srcFrame < len(a.Frames) && layerIdx < len(a.Frames[srcFrame].Cels) {
-			c := a.Frames[srcFrame].Cels[layerIdx]
-			return c, nil
+
+		// Access the source cel from the same layer but at the referenced frame
+		if layerIdx < len(a.Layers) {
+			lyr := a.Layers[layerIdx]
+			if srcFrame < len(lyr.Cels) {
+				c := lyr.Cels[srcFrame]
+				return c, nil
+			}
 		}
 		return nil, nil
 
@@ -687,7 +773,7 @@ func (a *Ase) parseCel(raw []byte, layerIdx int) (*Cel, error) {
 		numTiles := len(tileBytes) / bytesPerTile
 		cel.Tiles = make([]Tile, numTiles)
 
-		for i := 0; i < numTiles; i++ {
+		for i := range numTiles {
 			start := i * bytesPerTile
 			var rawTile uint32
 
@@ -713,6 +799,10 @@ func (a *Ase) parseCel(raw []byte, layerIdx int) (*Cel, error) {
 				XYD: flags,
 			}
 		}
+
+		// Ayrıştırma bittikten hemen sonra görseli oluştur:
+		cel.Image = cel.GetTilemapImage()
+
 		return &cel, nil
 
 	default:
@@ -762,25 +852,32 @@ func (a *Ase) parseCel(raw []byte, layerIdx int) (*Cel, error) {
 
 	return &cel, nil
 }
+
 func (a *Ase) buildUserDataText() []byte {
 	n := 0
 	for _, l := range a.Layers {
-		if l.IsVisible {
+		// Layer's own user data text
+		if l.Visible {
 			n += len(l.Text)
 		}
-	}
-	for _, fr := range a.Frames {
-		for _, c := range fr.Cels {
-			n += len(c.Text)
+		// Iterate through all cels belonging to this layer
+		for _, c := range l.Cels {
+			if c != nil {
+				n += len(c.Text)
+			}
 		}
 	}
+	// Note: If you have Tags or Slices with UserData,
+	// you should also iterate through them here.
+
 	return make([]byte, 0, n)
 }
+
 func (a *Ase) buildLayerUserDataText() [][]byte {
 	userdataText := a.buildUserDataText()
 	ld := make([][]byte, 0, len(a.Layers))
 	for _, l := range a.Layers {
-		if l.IsVisible && len(l.Text) > 0 {
+		if l.Visible && len(l.Text) > 0 {
 			ofs := len(userdataText)
 			userdataText = append(userdataText, l.Text...)
 			ld = append(ld, userdataText[ofs:])
@@ -792,10 +889,12 @@ func (a *Ase) buildLayerUserDataText() [][]byte {
 type Frame struct {
 	// Duration of this frame in the animation
 	Duration time.Duration
-	// Cels in this frame, ordered by layer index and group child level. that increase from bottom to top.
-	Cels []*Cel
-}
 
+	// // Cels in this frame, ordered by layer index and group child level.
+	// // that increase from bottom to top.
+	// // If a layer is a Group or has no content in this frame, its entry will be nil.
+	// Cels []*Cel
+}
 type SliceFrame struct {
 	// The bounds of the slice in the canvas
 	Bounds image.Rectangle
@@ -853,23 +952,31 @@ type Tile struct {
 	XYD FlipBitMask // XYD bitmask flags
 }
 
-// IsEmpty checks if the Cel is empty (has no image).
-func (c *Cel) IsEmpty() bool {
-	return c.Image == nil
-}
-
 func (c *Cel) setUserData(text string, col color.NRGBA) {
 	c.Text = text
 	c.Color = col
 }
 
 type LayerFlags struct {
-	IsVisible        bool
-	IsLocked         bool
-	IsBackground     bool
+	// Visible: Layer visibility state.
+	Visible bool
+	// Locked: Layer lock state (inverse of Aseprite 'Editable' flag).
+	Locked bool
+	// Background: Whether the layer is a background layer.
+	Background bool
+	// PreferLinkedCels: Whether linked cels are preferred.
 	PreferLinkedCels bool
-	IsCollapsed      bool
-	IsReference      bool
+	// GroupCollapsed: Whether the group is collapsed in the timeline.
+	GroupCollapsed bool
+	// Reference: Whether the layer is a reference layer.
+	Reference bool
+}
+
+func (l LayerFlags) String() string {
+	return fmt.Sprintf("Visible: %v\n"+"Locked: %v\n"+
+		"Background: %v\n"+"PreferLinkedCels: %v\n"+"GroupCollapsed: %v\n"+"ReferenceLayer: %v",
+		l.Visible, l.Locked, l.Background,
+		l.PreferLinkedCels, l.GroupCollapsed, l.Reference)
 }
 
 // Layer data
@@ -884,11 +991,32 @@ type Layer struct {
 	Opacity uint8
 
 	LayerFlags
+
+	// The child level is used to show the relationship of this layer with the last one read.
+	//
+	// https://github.com/aseprite/aseprite/blob/main/docs/ase-file-specs.md#note1
 	ChildLevel uint16
 
 	// Index for Ase.Tilesets[]
 	TilesetIndex uint32
 	Tileset      *Tileset
+
+	Cels []*Cel // Index matches the frame number
+
+	// parent is a private reference to the main Ase object.
+	parent *Ase
+	// rawIdx is the original index of the layer in the Aseprite file.
+	rawIdx int
+}
+
+// IsCelEmpty checks if the frame has no content.
+func (l *Layer) IsCelEmpty(frame int) bool {
+	return l.Cels[frame] == nil
+}
+
+// Cel returns the cel at the specified frame.
+func (l *Layer) Cel(frame int) *Cel {
+	return l.Cels[frame]
 }
 
 func (l *Layer) setUserData(text string, col color.NRGBA) {
@@ -955,6 +1083,7 @@ func parseColor(raw []byte) color.NRGBA {
 		A: raw[3],
 	}
 }
+
 func factorPowerOfTwo(n int) (a, b int) {
 	x := int(math.Ceil(math.Log2(float64(n))))
 	a = 1 << (x - x/2)
