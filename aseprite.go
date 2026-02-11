@@ -684,6 +684,10 @@ func (a *Ase) parseLayer(raw []byte) Layer {
 
 // Chunk0x2005
 func (a *Ase) parseCel(raw []byte, layerIdx int) (*Cel, error) {
+	if len(raw) < 16 {
+		return nil, errors.New("cel chunk too short")
+	}
+
 	cel := Cel{}
 	cel.LayerIndex = int(binary.LittleEndian.Uint16(raw[0:2]))
 
@@ -691,43 +695,50 @@ func (a *Ase) parseCel(raw []byte, layerIdx int) (*Cel, error) {
 		cel.Layer = a.Layers[cel.LayerIndex]
 	}
 
-	x := int(int16(binary.LittleEndian.Uint16(raw[2:])))
-	y := int(int16(binary.LittleEndian.Uint16(raw[4:])))
-
-	cel.Pos.X = x
-	cel.Pos.Y = y
+	cel.Pos.X = int(int16(binary.LittleEndian.Uint16(raw[2:4])))
+	cel.Pos.Y = int(int16(binary.LittleEndian.Uint16(raw[4:6])))
 	cel.Opacity = raw[6]
-	cel.Type = CelType(binary.LittleEndian.Uint16(raw[7:]))
-	cel.ZIndex = int(int16(binary.LittleEndian.Uint16(raw[9:])))
+	cel.Type = CelType(binary.LittleEndian.Uint16(raw[7:9]))
+	cel.ZIndex = int(int16(binary.LittleEndian.Uint16(raw[9:11])))
 
 	if layerIdx >= len(a.Layers) {
 		return nil, nil
 	}
 
-	raw = raw[16:] // Cel Header bitti, veriye geçiyoruz
+	// Move pointer past the 16-byte header
+	raw = raw[16:]
 
 	var pix []byte
-	cel.Size.X = int(binary.LittleEndian.Uint16(raw))
-	cel.Size.Y = int(binary.LittleEndian.Uint16(raw[2:]))
 
 	switch cel.Type {
-	case RawUncompressed:
-		pix = raw[4:]
-
 	case LinkedCel:
+		if len(raw) < 2 {
+			return nil, errors.New("linked cel data too short")
+		}
 		srcFrame := int(binary.LittleEndian.Uint16(raw))
 
 		// Access the source cel from the same layer but at the referenced frame
-		if layerIdx < len(a.Layers) {
-			lyr := a.Layers[layerIdx]
-			if srcFrame < len(lyr.Cels) {
-				c := lyr.Cels[srcFrame]
-				return c, nil
-			}
+		lyr := a.Layers[layerIdx]
+		if srcFrame < len(lyr.Cels) {
+			return lyr.Cels[srcFrame], nil
 		}
 		return nil, nil
 
+	case RawUncompressed:
+		if len(raw) < 4 {
+			return nil, errors.New("raw cel size data missing")
+		}
+		cel.Size.X = int(binary.LittleEndian.Uint16(raw[0:2]))
+		cel.Size.Y = int(binary.LittleEndian.Uint16(raw[2:4]))
+		pix = raw[4:]
+
 	case CompressedImage:
+		if len(raw) < 4 {
+			return nil, errors.New("compressed cel size data missing")
+		}
+		cel.Size.X = int(binary.LittleEndian.Uint16(raw[0:2]))
+		cel.Size.Y = int(binary.LittleEndian.Uint16(raw[2:4]))
+
 		zr, err := zlib.NewReader(bytes.NewReader(raw[4:]))
 		if err != nil {
 			return nil, err
@@ -741,21 +752,31 @@ func (a *Ase) parseCel(raw []byte, layerIdx int) (*Cel, error) {
 		pix = data
 
 	case CompressedTilemap:
-		bitsPerTile := binary.LittleEndian.Uint16(raw[4:])
-		tileIDMask := binary.LittleEndian.Uint32(raw[6:])
-		xFlipMask := binary.LittleEndian.Uint32(raw[10:])
-		yFlipMask := binary.LittleEndian.Uint32(raw[14:])
-		dFlipMask := binary.LittleEndian.Uint32(raw[18:])
+		if len(raw) < 4 {
+			return nil, errors.New("tilemap cel size data missing")
+		}
+		cel.Size.X = int(binary.LittleEndian.Uint16(raw[0:2]))
+		cel.Size.Y = int(binary.LittleEndian.Uint16(raw[2:4]))
 
-		raw = raw[32:]
-		zr, _ := zlib.NewReader(bytes.NewReader(raw))
+		bitsPerTile := binary.LittleEndian.Uint16(raw[4:6])
+		tileIDMask := binary.LittleEndian.Uint32(raw[6:10])
+		xFlipMask := binary.LittleEndian.Uint32(raw[10:14])
+		yFlipMask := binary.LittleEndian.Uint32(raw[14:18])
+		dFlipMask := binary.LittleEndian.Uint32(raw[18:22])
+
+		// Data starts at offset 32
+		zr, err := zlib.NewReader(bytes.NewReader(raw[32:]))
+		if err != nil {
+			return nil, err
+		}
+		defer zr.Close()
 		tileBytes, _ := io.ReadAll(zr)
 
 		bytesPerTile := int(bitsPerTile / 8)
 		numTiles := len(tileBytes) / bytesPerTile
 		cel.Tiles = make([]Tile, numTiles)
 
-		for i := range numTiles {
+		for i := 0; i < numTiles; i++ {
 			start := i * bytesPerTile
 			var rawTile uint32
 
@@ -782,15 +803,14 @@ func (a *Ase) parseCel(raw []byte, layerIdx int) (*Cel, error) {
 			}
 		}
 
-		// Ayrıştırma bittikten hemen sonra görseli oluştur:
 		cel.Image = cel.BuildTilemapImage()
-
 		return &cel, nil
 
 	default:
 		return nil, errors.New("unsupported cel type")
 	}
 
+	// Process pixel data for non-tilemap types
 	if len(pix) > 0 {
 		bounds := image.Rect(0, 0, cel.Size.X, cel.Size.Y)
 		var img image.Image
@@ -812,20 +832,17 @@ func (a *Ase) parseCel(raw []byte, layerIdx int) (*Cel, error) {
 					if i+1 < len(pix) {
 						g := pix[i]
 						al := pix[i+1]
-						nrgba.SetNRGBA(bounds.Min.X+dx, bounds.Min.Y+dy, color.NRGBA{
-							R: g, G: g, B: g, A: al,
-						})
+						nrgba.SetNRGBA(dx, dy, color.NRGBA{R: g, G: g, B: g, A: al})
 					}
 				}
 			}
 			img = nrgba
 		case NRGBA:
-			nrgba := &image.NRGBA{
+			img = &image.NRGBA{
 				Pix:    pix,
 				Stride: cel.Size.X * 4,
 				Rect:   bounds,
 			}
-			img = nrgba
 		default:
 			return nil, errors.New("invalid color depth")
 		}
