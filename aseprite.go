@@ -725,8 +725,6 @@ func (a *Ase) parseCel(raw []byte, layerIdx int) (*Cel, error) {
 	cel.Pos.Y = int(int16(binary.LittleEndian.Uint16(raw[4:6])))
 	cel.Opacity = raw[6]
 
-	fmt.Println("cel opacity:", cel.Opacity)
-
 	cel.Type = CelType(binary.LittleEndian.Uint16(raw[7:9]))
 	cel.ZIndex = int(int16(binary.LittleEndian.Uint16(raw[9:11])))
 
