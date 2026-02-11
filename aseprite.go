@@ -108,18 +108,23 @@ type Ase struct {
 
 	// Canvas size (width and height)
 	Size image.Point
-	// Timeline frames containing layer Cels
-	Frames []Frame
+
+	// Timeline frame durations
+	Durations []time.Duration
+
 	// Layer datas. Layer indices increase from bottom to top.
 	Layers []*Layer
+
 	// Aseprite slices. https://www.aseprite.org/api/slice#slice
 	Slices []Slice
+
 	// Timeline animation tags
 	Tags []Tag
 
 	// Palette index for used as transparent color in each layer. (only for indexed images)
 	TransparentIndex uint8
-	// Palette of file. (only for indexed images)
+
+	// Palette of file
 	Palette color.Palette
 
 	// Tilesets used in Tilemap layers
@@ -136,6 +141,21 @@ func (a *Ase) GetLayerByName(name string) *Layer {
 		return nil
 	}
 	return a.Layers[idx]
+}
+
+// BuildTilemapImages performs the final rasterization for all cels in tilemap layers.
+// It iterates through the tile grid, resolves tile IDs via the associated tileset,
+// and assembles the final image.NRGBA composite by applying bitmask flips (X/Y/D).
+func (a *Ase) BuildTilemapImages() {
+	for _, lyr := range a.Layers {
+		if lyr.Type == Tilemap {
+			for _, cel := range lyr.Cels {
+				if cel != nil && cel.Type == CompressedTilemap {
+					cel.BuildTilemapImage()
+				}
+			}
+		}
+	}
 }
 
 // Tileset represents a set of tiles defined in the .ase file (Chunk 0x2023)
@@ -199,16 +219,16 @@ func (ts *Tileset) TileImage(tileID uint32) image.Image {
 	return nil
 }
 
-// BuildTilemapImage() is only for Tilemap layers.
-//
-// Constructs and returns a full image of the tilemap cel
-// by rendering all its tiles using the associated tileset.
-func (c *Cel) BuildTilemapImage() image.Image {
-	if c.Layer.Type != Tilemap || c.Type != CompressedTilemap || c.Layer.Tileset == nil {
-		return c.Image
+// BuildTilemapImage rasterizes the tilemap cel into a composite image.NRGBA.
+// It resolves each tile index against the associated tileset, applies bitmask
+// transformations for flips (X/Y/D), and performs a draw-call to assemble
+// the final pixel buffer into the Cel's Image field.
+func (c *Cel) BuildTilemapImage() {
+	if c.layer.Type != Tilemap || c.Type != CompressedTilemap || c.layer.tileset == nil {
+		return
 	}
 
-	ts := c.Layer.Tileset
+	ts := c.layer.tileset
 	fullWidth := c.Size.X * ts.TileSize.X
 	fullHeight := c.Size.Y * ts.TileSize.Y
 
@@ -227,7 +247,7 @@ func (c *Cel) BuildTilemapImage() image.Image {
 		posY := gridY * ts.TileSize.Y
 		drawTile(res, tileImg, posX, posY, tile.XYD)
 	}
-	return res
+	c.Image = res
 }
 
 func (a *Ase) parse(r io.Reader, onlyVisible bool) (filesize int64, err error) {
@@ -256,8 +276,7 @@ func (a *Ase) parse(r io.Reader, onlyVisible bool) (filesize int64, err error) {
 	}
 	a.Palette[a.TransparentIndex] = color.Transparent
 
-	// Initialize frames slice. Cels are now stored in Layers.
-	a.Frames = make([]Frame, 0, totalFrames)
+	a.Durations = make([]time.Duration, 0, totalFrames)
 
 	chunkHeaderBuf := make([]byte, 6)
 	frameHeaderBuf := make([]byte, 16)
@@ -280,9 +299,7 @@ func (a *Ase) parse(r io.Reader, onlyVisible bool) (filesize int64, err error) {
 			nchunks = int(oldChunks)
 		}
 
-		currentFrame := Frame{
-			Duration: time.Millisecond * time.Duration(durationMS),
-		}
+		currentDuration := time.Millisecond * time.Duration(durationMS)
 
 		var lastUserDataTarget userDataReceiver
 		var tagQueue []userDataReceiver
@@ -325,7 +342,7 @@ func (a *Ase) parse(r io.Reader, onlyVisible bool) (filesize int64, err error) {
 				if cel != nil {
 					// Store cel directly in the layer's frame index
 					if layerIdx < len(a.Layers) {
-						cel.Layer = a.Layers[layerIdx]
+						cel.layer = a.Layers[layerIdx]
 						a.Layers[layerIdx].Cels[i] = cel
 						lastUserDataTarget = cel
 					}
@@ -375,7 +392,7 @@ func (a *Ase) parse(r io.Reader, onlyVisible bool) (filesize int64, err error) {
 				lastUserDataTarget = nil
 			}
 		}
-		a.Frames = append(a.Frames, currentFrame)
+		a.Durations = append(a.Durations, currentDuration)
 	}
 
 	// Filter layers based on visibility
@@ -403,7 +420,7 @@ func (a *Ase) parse(r io.Reader, onlyVisible bool) (filesize int64, err error) {
 	// Link tilesets to layers if they are tilemaps
 	for _, lyr := range a.Layers {
 		if lyr.Type == Tilemap && int(lyr.TilesetIndex) < len(a.Tilesets) {
-			lyr.Tileset = a.Tilesets[lyr.TilesetIndex]
+			lyr.tileset = a.Tilesets[lyr.TilesetIndex]
 		}
 	}
 
@@ -692,12 +709,15 @@ func (a *Ase) parseCel(raw []byte, layerIdx int) (*Cel, error) {
 	cel.LayerIndex = int(binary.LittleEndian.Uint16(raw[0:2]))
 
 	if int(cel.LayerIndex) < len(a.Layers) {
-		cel.Layer = a.Layers[cel.LayerIndex]
+		cel.layer = a.Layers[cel.LayerIndex]
 	}
 
 	cel.Pos.X = int(int16(binary.LittleEndian.Uint16(raw[2:4])))
 	cel.Pos.Y = int(int16(binary.LittleEndian.Uint16(raw[4:6])))
 	cel.Opacity = raw[6]
+
+	fmt.Println("cel opacity:", cel.Opacity)
+
 	cel.Type = CelType(binary.LittleEndian.Uint16(raw[7:9]))
 	cel.ZIndex = int(int16(binary.LittleEndian.Uint16(raw[9:11])))
 
@@ -803,7 +823,6 @@ func (a *Ase) parseCel(raw []byte, layerIdx int) (*Cel, error) {
 			}
 		}
 
-		cel.Image = cel.BuildTilemapImage()
 		return &cel, nil
 
 	default:
@@ -855,20 +874,15 @@ func (a *Ase) parseCel(raw []byte, layerIdx int) (*Cel, error) {
 func (a *Ase) buildUserDataText() []byte {
 	n := 0
 	for _, l := range a.Layers {
-		// Layer's own user data text
 		if l.Visible {
 			n += len(l.Text)
 		}
-		// Iterate through all cels belonging to this layer
 		for _, c := range l.Cels {
 			if c != nil {
 				n += len(c.Text)
 			}
 		}
 	}
-	// Note: If you have Tags or Slices with UserData,
-	// you should also iterate through them here.
-
 	return make([]byte, 0, n)
 }
 
@@ -888,12 +902,8 @@ func (a *Ase) buildLayerUserDataText() [][]byte {
 type Frame struct {
 	// Duration of this frame in the animation
 	Duration time.Duration
-
-	// // Cels in this frame, ordered by layer index and group child level.
-	// // that increase from bottom to top.
-	// // If a layer is a Group or has no content in this frame, its entry will be nil.
-	// Cels []*Cel
 }
+
 type SliceFrame struct {
 	// The bounds of the slice in the canvas
 	Bounds image.Rectangle
@@ -936,14 +946,14 @@ type Cel struct {
 	// This is nil for regular image layers.
 	Tiles []Tile
 
-	// UserData contains extra information like text and color associated with the cel.
-	UserData
-
 	// Type specifies if this cel is a Raw Image, Linked Cel, Compressed Image, or Tilemap.
 	Type CelType
 
-	// Layer is a reference to the layer this cel belongs to,
-	Layer *Layer
+	// UserData contains extra information like text and color associated with the cel.
+	UserData
+
+	// layer is a reference to the layer this cel belongs to,
+	layer *Layer
 }
 
 type Tile struct {
@@ -954,6 +964,11 @@ type Tile struct {
 func (c *Cel) setUserData(text string, col color.NRGBA) {
 	c.Text = text
 	c.Color = col
+}
+
+// GetLayer returns layer this cel belongs to
+func (c *Cel) GetLayer() *Layer {
+	return c.layer
 }
 
 type LayerFlags struct {
@@ -973,23 +988,32 @@ type LayerFlags struct {
 
 func (l LayerFlags) String() string {
 	return fmt.Sprintf("Visible: %v\n"+"Locked: %v\n"+
-		"Background: %v\n"+"PreferLinkedCels: %v\n"+"GroupCollapsed: %v\n"+"ReferenceLayer: %v",
+		"Background: %v\n"+"PreferLinkedCels: %v\n"+"Collapsed: %v\n"+"Reference: %v",
 		l.Visible, l.Locked, l.Background,
 		l.PreferLinkedCels, l.GroupCollapsed, l.Reference)
 }
 
 // Layer data
 type Layer struct {
-	UserData
-	Type LayerType
+
 	// Layer name.
 	Name string
+
+	// Layer type
+	Type LayerType
+
+	LayerFlags
+
 	// Blending mode of this layer.
 	BlendMode BlendMode
+
 	// Layer opacity. (0-255)
 	Opacity uint8
 
-	LayerFlags
+	UserData
+
+	// Index matches the frame number
+	Cels []*Cel
 
 	// The child level is used to show the relationship of this layer with the last one read.
 	//
@@ -998,14 +1022,19 @@ type Layer struct {
 
 	// Index for Ase.Tilesets[]
 	TilesetIndex uint32
-	Tileset      *Tileset
 
-	Cels []*Cel // Index matches the frame number
-
+	// tileset is a private reference to Tileset.
+	tileset *Tileset
 	// parent is a private reference to the main Ase object.
 	parent *Ase
 	// rawIdx is the original index of the layer in the Aseprite file.
 	rawIdx int
+}
+
+// GetTileset returns the Tileset used by Tilemap layers.
+// It returns nil if layer is not a tilemap.
+func (l *Layer) GetTileset() *Tileset {
+	return l.tileset
 }
 
 // IsCelEmpty checks if the frame has no content.
