@@ -304,7 +304,7 @@ func (a *Ase) parse(r io.Reader, onlyVisible bool) (filesize int64, err error) {
 		var lastUserDataTarget userDataReceiver
 		var tagQueue []userDataReceiver
 
-		for j := 0; j < nchunks; j++ {
+		for range nchunks {
 			if _, err := io.ReadFull(r, chunkHeaderBuf); err != nil {
 				return currentOffset, err
 			}
@@ -492,8 +492,8 @@ func (a *Ase) parseTileset(raw []byte) (Tileset, error) {
 		case Grayscale:
 			nrgba := image.NewNRGBA(tilesetBounds)
 			stride := tilesetBounds.Dx() * 2
-			for y := 0; y < tilesetBounds.Dy(); y++ {
-				for x := 0; x < tilesetBounds.Dx(); x++ {
+			for y := range tilesetBounds.Dy() {
+				for x := range tilesetBounds.Dx() {
 					i := y*stride + x*2
 					if i+1 < len(pix) {
 						grayValue := pix[i]
@@ -531,7 +531,10 @@ func (a *Ase) parseSlice(raw []byte, totalFrames int) Slice {
 	raw = raw[14+len(name):]
 	s.Name = name
 	frameIndices := make([]int, 0, nKeysForSlice)
-	for i := 0; len(raw) > 0 && i < nKeysForSlice; i++ {
+	for range nKeysForSlice {
+		if len(raw) == 0 {
+			break
+		}
 		frameIdx := int(binary.LittleEndian.Uint32(raw))
 		frameIndices = append(frameIndices, frameIdx)
 		var key SliceFrame
@@ -599,7 +602,7 @@ func (a *Ase) parsePalette(raw []byte) {
 	entries := binary.LittleEndian.Uint32(raw[0:])
 	lo := binary.LittleEndian.Uint32(raw[4:])
 	raw = raw[20:]
-	for i := 0; i < int(entries); i++ {
+	for i := range int(entries) {
 		if len(raw) < 2 {
 			break
 		}
@@ -622,7 +625,7 @@ func (a *Ase) parseOldPalette0x0004(raw []byte) {
 	packets := binary.LittleEndian.Uint16(raw)
 	raw = raw[2:]
 	currentIndex := 0
-	for i := 0; i < int(packets); i++ {
+	for range int(packets) {
 		skip := int(raw[0])
 		currentIndex += skip
 		n := int(raw[1])
@@ -630,7 +633,10 @@ func (a *Ase) parseOldPalette0x0004(raw []byte) {
 			n = 256
 		}
 		raw = raw[2:]
-		for j := 0; j < n && currentIndex < len(a.Palette); j++ {
+		for range n {
+			if currentIndex >= len(a.Palette) {
+				break
+			}
 			a.Palette[currentIndex] = color.NRGBA{
 				R: raw[0],
 				G: raw[1],
@@ -648,7 +654,7 @@ func (a *Ase) parseOldPalette0x0011(raw []byte) {
 	packets := binary.LittleEndian.Uint16(raw)
 	raw = raw[2:]
 	currentIndex := 0
-	for i := 0; i < int(packets); i++ {
+	for range int(packets) {
 		skip := int(raw[0])
 		currentIndex += skip
 		n := int(raw[1])
@@ -656,7 +662,10 @@ func (a *Ase) parseOldPalette0x0011(raw []byte) {
 			n = 256
 		}
 		raw = raw[2:]
-		for j := 0; j < n && currentIndex < len(a.Palette); j++ {
+		for range n {
+			if currentIndex >= len(a.Palette) {
+				break
+			}
 			a.Palette[currentIndex] = color.NRGBA{
 				R: raw[0] * 4,
 				G: raw[1] * 4,
@@ -796,7 +805,7 @@ func (a *Ase) parseCel(raw []byte, layerIdx int) (*Cel, error) {
 		numTiles := len(tileBytes) / bytesPerTile
 		cel.Tiles = make([]Tile, numTiles)
 
-		for i := 0; i < numTiles; i++ {
+		for i := range numTiles {
 			start := i * bytesPerTile
 			var rawTile uint32
 
@@ -845,8 +854,8 @@ func (a *Ase) parseCel(raw []byte, layerIdx int) (*Cel, error) {
 		case Grayscale:
 			nrgba := image.NewNRGBA(bounds)
 			stride := cel.Size.X * 2
-			for dy := 0; dy < cel.Size.Y; dy++ {
-				for dx := 0; dx < cel.Size.X; dx++ {
+			for dy := range cel.Size.Y {
+				for dx := range cel.Size.X {
 					i := dy*stride + dx*2
 					if i+1 < len(pix) {
 						g := pix[i]
