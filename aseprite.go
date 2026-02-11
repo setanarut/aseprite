@@ -551,8 +551,8 @@ func (a *Ase) parseTags(raw []byte) []Tag {
 	ptr := raw[10:]
 	for i := range ntags {
 		t := &tags[i]
-		t.Start = binary.LittleEndian.Uint16(ptr)
-		t.End = binary.LittleEndian.Uint16(ptr[2:])
+		t.Start = int(binary.LittleEndian.Uint16(ptr))
+		t.End = int(binary.LittleEndian.Uint16(ptr[2:]))
 		t.LoopDirection = LoopDirection(ptr[4])
 		t.Repeat = binary.LittleEndian.Uint16(ptr[5:])
 		nameLen := binary.LittleEndian.Uint16(ptr[17:])
@@ -1039,9 +1039,9 @@ type Tag struct {
 	UserData
 	Name string
 	// Frame index where this tag starts.
-	Start uint16
+	Start int
 	// Frame index where this tag ends.
-	End uint16
+	End int
 	// Play this animation section N times, 0 means infinite.
 	Repeat        uint16
 	LoopDirection LoopDirection
