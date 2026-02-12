@@ -4,6 +4,7 @@ import (
 	"encoding/binary"
 	"image"
 	"image/color"
+	"image/draw"
 )
 
 func expandSliceKey(slice *Slice, lenFrames int, frameIndices []int) {
@@ -42,14 +43,7 @@ func parseColor(raw []byte) color.NRGBA {
 	}
 }
 
-// func factorPowerOfTwo(n int) (a, b int) {
-// 	x := int(math.Ceil(math.Log2(float64(n))))
-// 	a = 1 << (x - x/2)
-// 	b = 1 << (x / 2)
-// 	return
-// }
-
-func drawTile(dst *image.NRGBA, src image.Image, x, y int, flags FlipBitMask) {
+func drawTile(dst draw.Image, src image.Image, x, y int, flags FlipBitMask) {
 	bounds := src.Bounds()
 	w, h := bounds.Dx(), bounds.Dy()
 	for dy := range h {

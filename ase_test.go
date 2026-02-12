@@ -1,11 +1,17 @@
 package aseprite
 
 import (
+	"encoding/binary"
 	"fmt"
 	"image"
 	"image/color"
+	"image/png"
+	"os"
+	"slices"
 	"testing"
 	"time"
+
+	"github.com/google/uuid"
 )
 
 func TestAseDataStructure(t *testing.T) {
@@ -15,6 +21,13 @@ func TestAseDataStructure(t *testing.T) {
 		Size:          image.Point{X: 64, Y: 64},
 		PixelRatio:    image.Point{1, 1},
 		HasLayersUUID: true,
+		Palette: color.Palette{
+			color.NRGBA{0, 0, 0, 0},
+			color.NRGBA{223, 62, 35, 156},
+			color.NRGBA{255, 213, 65, 255},
+			color.NRGBA{156, 219, 67, 255},
+			color.NRGBA{255, 255, 255, 255},
+		},
 		Durations: []time.Duration{
 			time.Millisecond * 500,
 			time.Millisecond * 500,
@@ -23,16 +36,9 @@ func TestAseDataStructure(t *testing.T) {
 		},
 		Layers: []*Layer{
 			{
-				Name: "group1",
-				Type: 1,
-				LayerFlags: LayerFlags{
-					Visible:          false,
-					Locked:           false,
-					Background:       false,
-					PreferLinkedCels: false,
-					GroupCollapsed:   false,
-					Reference:        false,
-				},
+				Name:      "group1",
+				Type:      1,
+				Flags:     2,
 				BlendMode: 0,
 				Opacity:   0,
 				UserData: UserData{
@@ -42,11 +48,9 @@ func TestAseDataStructure(t *testing.T) {
 				Cels: []*Cel{nil, nil, nil, nil},
 			},
 			{
-				Name: "test tilemap",
-				Type: 2,
-				LayerFlags: LayerFlags{
-					Visible: false,
-				},
+				Name:    "test tilemap",
+				Type:    2,
+				Flags:   2,
 				Opacity: 158,
 				UserData: UserData{
 					Color: color.NRGBA{R: 223, G: 62, B: 35, A: 255},
@@ -111,16 +115,9 @@ func TestAseDataStructure(t *testing.T) {
 				TilesetIndex: 0,
 			},
 			{
-				Name: "my image layer",
-				Type: 0,
-				LayerFlags: LayerFlags{
-					Visible:          true,
-					Locked:           false,
-					Background:       false,
-					PreferLinkedCels: false,
-					GroupCollapsed:   false,
-					Reference:        false,
-				},
+				Name:    "my image layer",
+				Type:    0,
+				Flags:   3,
 				Opacity: 255,
 				UserData: UserData{
 					Text: "test data",
@@ -212,7 +209,7 @@ func TestAseDataStructure(t *testing.T) {
 		},
 	}
 
-	actual, err := Read("test_files/test.ase", false)
+	actual, err := Read("test_files/test_paletted.ase", false)
 	if err != nil {
 		t.Fatalf("Failed to read file: %v", err)
 	}
@@ -220,8 +217,305 @@ func TestAseDataStructure(t *testing.T) {
 	compareAse(t, &expected, &actual)
 }
 
+func TestAseProp(t *testing.T) {
+
+	expected := Ase{
+		ColorDepth:    8,
+		Size:          image.Point{X: 16, Y: 16},
+		PixelRatio:    image.Point{1, 2},
+		Palette:       color.Palette{color.NRGBA{180, 32, 42, 255}},
+		HasLayersUUID: true,
+		Layers: []*Layer{
+			{
+				Name: "Layer 1",
+				Type: Image,
+
+				UUID:      uuid.UUID{82, 121, 255, 18, 51, 254, 69, 190, 162, 78, 113, 67, 50, 237, 190, 236},
+				Flags:     0,
+				BlendMode: Normal,
+				Opacity:   255,
+				UserData: UserData{
+					Color: color.NRGBA{223, 62, 35, 255},
+					Text:  "user data text",
+				},
+			},
+		},
+	}
+
+	actual, err := Read("test_files/prop.ase", false)
+	if err != nil {
+		t.Fatalf("Failed to read file: %v", err)
+	}
+
+	compareAseProp(t, &expected, &actual)
+}
+
+func TestPalettedTilemapRender(t *testing.T) {
+
+	a, err := Read("test_files/test_paletted.ase", false)
+	if err != nil {
+		t.Fatalf("Failed to read file: %v", err)
+	}
+
+	a.BuildTilemapImages()
+
+	gotImage := a.GetLayerByName("test tilemap").Cel(0).Image
+
+	gotImageP, ok := gotImage.(*image.Paletted)
+
+	if !ok {
+		t.Errorf("Tilemap gotImage image is not *image.Paletted")
+	}
+
+	file, err := os.Open("test_files/tilemap_paletted.png")
+	if err != nil {
+		panic(err)
+	}
+
+	expImage, err := png.Decode(file)
+	if err != nil {
+		panic(err)
+	}
+
+	expImageP, ok := expImage.(*image.Paletted)
+
+	if !ok {
+		t.Errorf("Tilemap expImage image is not *image.Paletted")
+	}
+
+	if !slices.Equal(gotImageP.Pix, expImageP.Pix) {
+		t.Errorf("Tilemap image is not equal")
+	}
+
+}
+func TestNRGBATilemapRender(t *testing.T) {
+
+	a, err := Read("test_files/test_nrgba.ase", false)
+	if err != nil {
+		t.Fatalf("Failed to read file: %v", err)
+	}
+
+	a.BuildTilemapImages()
+
+	gotImage := a.GetLayerByName("test tilemap").Cel(0).Image
+
+	gotImageNRGBA, ok := gotImage.(*image.NRGBA)
+
+	if !ok {
+		t.Errorf("Tilemap gotImage image is not *image.NRGBA")
+	}
+
+	file, err := os.Open("test_files/tilemap_nrgba.png")
+	if err != nil {
+		panic(err)
+	}
+
+	expImage, err := png.Decode(file)
+	if err != nil {
+		panic(err)
+	}
+
+	expImageNRGBA, ok := expImage.(*image.NRGBA)
+
+	if !ok {
+		t.Errorf("Tilemap expImage image is not *image.NRGBA type is %T", expImageNRGBA)
+	}
+
+	if !slices.Equal(gotImageNRGBA.Pix, expImageNRGBA.Pix) {
+		t.Errorf("Tilemap image is not equal")
+	}
+
+}
+func TestGrayscaleTilemapRender(t *testing.T) {
+
+	a, err := Read("test_files/test_grayscale.ase", false)
+	if err != nil {
+		t.Fatalf("Failed to read file: %v", err)
+	}
+
+	a.BuildTilemapImages()
+
+	gotImage := a.GetLayerByName("test tilemap").Cel(0).Image
+
+	gotImageNRGBA, ok := gotImage.(*image.NRGBA)
+
+	if !ok {
+		t.Errorf("Tilemap gotImage image is not *image.NRGBA")
+	}
+
+	file, err := os.Open("test_files/tilemap_grayscale.png")
+	if err != nil {
+		panic(err)
+	}
+
+	expImage, err := png.Decode(file)
+	if err != nil {
+		panic(err)
+	}
+
+	expImageNRGBA, ok := expImage.(*image.NRGBA)
+
+	if !ok {
+		t.Errorf("Tilemap expImage image is not *image.NRGBA type is %T", expImageNRGBA)
+	}
+
+	if !slices.Equal(gotImageNRGBA.Pix, expImageNRGBA.Pix) {
+		t.Errorf("Tilemap image is not equal")
+	}
+
+}
+
+func TestParseWrongFile(t *testing.T) {
+	_, err := Read("test_files/tilemap_grayscale.png", false)
+	if err == nil {
+		t.Errorf("Ok to read wrong file: %v", err)
+	}
+
+}
+
+func TestParseOldPalette0x0011(t *testing.T) {
+	a := &Ase{
+		Palette: make(color.Palette, 256),
+	}
+
+	raw := []byte{
+		0x01, 0x00,
+		0x00,
+		0x02,
+		63, 0, 0,
+		0, 63, 0,
+	}
+
+	a.parseOldPalette0x0011(raw)
+
+	if a.Palette[0].(color.NRGBA).R != 252 {
+		t.Error("İlk renk yanlış")
+	}
+
+	a2 := &Ase{
+		Palette: make(color.Palette, 256),
+	}
+
+	raw2 := make([]byte, 2+2+256*3)
+	binary.LittleEndian.PutUint16(raw2[0:2], 1)
+	raw2[2] = 0x00
+	raw2[3] = 0x00
+
+	a2.parseOldPalette0x0011(raw2)
+
+	if len(a2.Palette) != 256 {
+		t.Error("Palette boyutu yanlış")
+	}
+}
+
+func TestParseColorProfile(t *testing.T) {
+	a := &Ase{}
+
+	data := make([]byte, 16)
+	binary.LittleEndian.PutUint16(data[0:2], 1)
+	binary.LittleEndian.PutUint32(data[4:8], 65536)
+
+	cp, err := a.parseColorProfile(data)
+	if err != nil {
+		t.Error(err)
+	}
+	if cp.Gamma != 1.0 {
+		t.Error("Gamma yanlış")
+	}
+
+	data2 := make([]byte, 24)
+	binary.LittleEndian.PutUint16(data2[0:2], 2)
+	binary.LittleEndian.PutUint32(data2[16:20], 4)
+	copy(data2[20:24], []byte{1, 2, 3, 4})
+
+	cp2, err := a.parseColorProfile(data2)
+	if err != nil || len(cp2.ICC) != 4 {
+		t.Error("ICC parse error")
+	}
+
+	_, err = a.parseColorProfile([]byte{1, 2, 3})
+	if err == nil {
+		t.Error("no error error")
+	}
+
+	data3 := make([]byte, 18)
+	binary.LittleEndian.PutUint16(data3[0:2], 2)
+	_, err = a.parseColorProfile(data3)
+	if err == nil {
+		t.Error("no error error")
+	}
+
+	data4 := make([]byte, 20)
+	binary.LittleEndian.PutUint16(data4[0:2], 2)
+	binary.LittleEndian.PutUint32(data4[16:20], 100)
+	_, err = a.parseColorProfile(data4)
+	if err == nil {
+		t.Error("no error error")
+	}
+}
+
+func compareTileset(t *testing.T, index int, exp, act *Tileset) {
+	t.Helper()
+	prefix := fmt.Sprintf("Tileset[%d]('%s')", index, exp.Name)
+
+	if exp.Name != act.Name {
+		t.Errorf("%s Name: expected '%s', got '%s'", prefix, exp.Name, act.Name)
+	}
+	if exp.ID != act.ID {
+		t.Errorf("%s ID: expected %d, got %d", prefix, exp.ID, act.ID)
+	}
+	if exp.TileSize != act.TileSize {
+		t.Errorf("%s TileSize: expected %v, got %v", prefix, exp.TileSize, act.TileSize)
+	}
+	if exp.NumTiles != act.NumTiles {
+		t.Errorf("%s NumTiles: expected %d, got %d", prefix, exp.NumTiles, act.NumTiles)
+	}
+	if exp.Flags != act.Flags {
+		t.Errorf("%s Flags: expected %d, got %d", prefix, exp.Flags, act.Flags)
+	}
+	if exp.BaseIndex != act.BaseIndex {
+		t.Errorf("%s BaseIndex: expected %d, got %d", prefix, exp.BaseIndex, act.BaseIndex)
+	}
+
+	// Image existence check
+	if (exp.Image == nil) != (act.Image == nil) {
+		t.Errorf("%s Image: expected nil=%v, got nil=%v", prefix, exp.Image == nil, act.Image == nil)
+	}
+}
+
+func compareUserData(t *testing.T, prefix string, exp, act *UserData) {
+	t.Helper()
+
+	if exp.Text != act.Text {
+		t.Errorf("%s UserData.Text: expected '%s', got '%s'", prefix, exp.Text, act.Text)
+	}
+
+	if !isColorEqual(exp.Color, act.Color) {
+		t.Errorf("%s UserData.Color: expected %+v, got %+v", prefix, exp.Color, act.Color)
+	}
+}
+
+func isColorEqual(c1, c2 color.NRGBA) bool {
+	// Both transparent
+	if c1.A == 0 && c2.A == 0 {
+		return true
+	}
+
+	// Aseprite sometimes returns empty colors as RGB 0, A 255
+	if (c1.R == 0 && c1.G == 0 && c1.B == 0 && (c1.A == 0 || c1.A == 255)) &&
+		(c2.R == 0 && c2.G == 0 && c2.B == 0 && (c2.A == 0 || c2.A == 255)) {
+		return true
+	}
+
+	return c1 == c2
+}
+
 func compareAse(t *testing.T, exp, act *Ase) {
 	t.Helper()
+
+	if !slices.Equal(exp.Palette, act.Palette) {
+		t.Errorf("Palette: expected %d, got %d", exp.Palette, act.Palette)
+	}
 
 	// Basic properties
 	if exp.ColorDepth != act.ColorDepth {
@@ -334,8 +628,30 @@ func compareLayer(t *testing.T, index int, exp, act *Layer) {
 	}
 
 	// Layer flags
-	if exp.LayerFlags != act.LayerFlags {
-		t.Errorf("%s LayerFlags: expected %+v, got %+v", prefix, exp.LayerFlags, act.LayerFlags)
+	if exp.Flags != act.Flags {
+		t.Errorf("%s LayerFlags: expected %+v, got %+v", prefix, exp.Flags, act.Flags)
+	}
+
+	if exp.IsVisible() != (exp.Flags&1 != 0) {
+		t.Errorf("exp.IsVisible() wrong return value")
+	}
+	if exp.IsLocked() != (exp.Flags&2 == 0) {
+		t.Errorf("exp.IsLocked() wrong return value")
+	}
+
+	if exp.IsBackgroundLayer() != (exp.Flags&8 != 0) {
+		t.Errorf("exp.IsBackgroundLayer() wrong return value")
+	}
+
+	if exp.PreferLinkedCels() != (exp.Flags&16 != 0) {
+		t.Errorf("exp.PreferLinkedCels() wrong return value")
+	}
+
+	if exp.IsGroupCollapsed() != (exp.Flags&32 != 0) {
+		t.Errorf("exp.IsGroupCollapsed() wrong return value")
+	}
+	if exp.IsReferenceLayer() != (exp.Flags&64 != 0) {
+		t.Errorf("exp.IsReferenceLayer() wrong return value")
 	}
 
 	compareUserData(t, prefix, &exp.UserData, &act.UserData)
@@ -422,58 +738,50 @@ func compareSlice(t *testing.T, index int, exp, act *Slice) {
 	}
 }
 
-func compareTileset(t *testing.T, index int, exp, act *Tileset) {
-	t.Helper()
-	prefix := fmt.Sprintf("Tileset[%d]('%s')", index, exp.Name)
-
-	if exp.Name != act.Name {
-		t.Errorf("%s Name: expected '%s', got '%s'", prefix, exp.Name, act.Name)
-	}
-	if exp.ID != act.ID {
-		t.Errorf("%s ID: expected %d, got %d", prefix, exp.ID, act.ID)
-	}
-	if exp.TileSize != act.TileSize {
-		t.Errorf("%s TileSize: expected %v, got %v", prefix, exp.TileSize, act.TileSize)
-	}
-	if exp.NumTiles != act.NumTiles {
-		t.Errorf("%s NumTiles: expected %d, got %d", prefix, exp.NumTiles, act.NumTiles)
-	}
-	if exp.Flags != act.Flags {
-		t.Errorf("%s Flags: expected %d, got %d", prefix, exp.Flags, act.Flags)
-	}
-	if exp.BaseIndex != act.BaseIndex {
-		t.Errorf("%s BaseIndex: expected %d, got %d", prefix, exp.BaseIndex, act.BaseIndex)
-	}
-
-	// Image existence check
-	if (exp.Image == nil) != (act.Image == nil) {
-		t.Errorf("%s Image: expected nil=%v, got nil=%v", prefix, exp.Image == nil, act.Image == nil)
-	}
-}
-
-func compareUserData(t *testing.T, prefix string, exp, act *UserData) {
+// Basic Sprite properties
+func compareAseProp(t *testing.T, exp, act *Ase) {
 	t.Helper()
 
-	if exp.Text != act.Text {
-		t.Errorf("%s UserData.Text: expected '%s', got '%s'", prefix, exp.Text, act.Text)
+	if !slices.Equal(exp.Palette, act.Palette) {
+		t.Errorf("Palette: expected %d, got %d", exp.Palette, act.Palette)
 	}
 
-	if !isColorEqual(exp.Color, act.Color) {
-		t.Errorf("%s UserData.Color: expected %+v, got %+v", prefix, exp.Color, act.Color)
-	}
-}
-
-func isColorEqual(c1, c2 color.NRGBA) bool {
-	// Both transparent
-	if c1.A == 0 && c2.A == 0 {
-		return true
+	if exp.Size != act.Size {
+		t.Errorf("Size: expected %v, got %v", exp.Size, act.Size)
 	}
 
-	// Aseprite sometimes returns empty colors as RGB 0, A 255
-	if (c1.R == 0 && c1.G == 0 && c1.B == 0 && (c1.A == 0 || c1.A == 255)) &&
-		(c2.R == 0 && c2.G == 0 && c2.B == 0 && (c2.A == 0 || c2.A == 255)) {
-		return true
+	if exp.ColorDepth != act.ColorDepth {
+		t.Errorf("ColorDepth: expected %d, got %d", exp.ColorDepth, act.ColorDepth)
 	}
 
-	return c1 == c2
+	if exp.PixelRatio != act.PixelRatio {
+		t.Errorf("PixelRatio: expected %v, got %v", exp.PixelRatio, act.PixelRatio)
+	}
+	if exp.HasLayersUUID != act.HasLayersUUID {
+		t.Errorf("HasUUID: expected %v, got %v", exp.HasLayersUUID, act.HasLayersUUID)
+	}
+
+	layer := act.GetLayerByUUID(uuid.UUID{82, 121, 255, 18, 51, 254, 69, 190, 162, 78, 113, 67, 50, 237, 190, 236})
+	layerByName := act.GetLayerByName(layer.Name)
+	if layer != layerByName {
+		t.Errorf("Layer mismatch: GetLayerByUUID and GetLayerByName(%q) returned different instances. UUID layer: %+v, Name layer: %+v",
+			layer.Name, layer, layerByName)
+	}
+
+	if layer := act.GetLayerByUUID(uuid.UUID{}); layer != nil {
+		t.Errorf("GetLayerByUUID should return nil for empty UUID, got %+v", layer)
+	}
+
+	if layer := act.GetLayerByName("FakeLayerName999"); layer != nil {
+		t.Errorf("GetLayerByName should return nil for non-existent name, got %+v", layer)
+	}
+
+	if exp.Layers[0].UUID != layer.UUID {
+		t.Errorf("Size: expected %v, got %v", exp.Layers[0].UUID, act.Layers[0].UUID)
+	}
+
+	if exp.Layers[0].UserData != act.Layers[0].UserData {
+		t.Errorf("Size: expected %v, got %v", exp.Layers[0].UserData, act.Layers[0].UserData)
+	}
+
 }

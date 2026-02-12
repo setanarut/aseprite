@@ -180,7 +180,7 @@ func (a *Ase) parse(r io.Reader, onlyVisible bool) (filesize int64, err error) {
 				l.rawIndex = len(a.Layers)
 				// Pre-allocate Cels slice for the layer to match total frames
 				l.Cels = make([]*Cel, totalFrames)
-				a.Layers = append(a.Layers, &l)
+				a.Layers = append(a.Layers, l)
 				lastUserDataTarget = a.Layers[len(a.Layers)-1]
 
 			case 0x2005: // Cel Chunk
@@ -263,7 +263,7 @@ func (a *Ase) parse(r io.Reader, onlyVisible bool) (filesize int64, err error) {
 			}
 		}
 
-		isEffectiveVisible := l.Visible && parentVisible
+		isEffectiveVisible := l.IsVisible() && parentVisible
 		levelVisibility[l.ChildLevel] = isEffectiveVisible
 
 		if onlyVisible && !isEffectiveVisible {
@@ -284,17 +284,10 @@ func (a *Ase) parse(r io.Reader, onlyVisible bool) (filesize int64, err error) {
 }
 
 // Chunk0x2004
-func (a *Ase) parseLayer(raw []byte) Layer {
+func (a *Ase) parseLayer(raw []byte) *Layer {
 	var l Layer
 
-	flags := binary.LittleEndian.Uint16(raw)
-	l.Visible = flags&1 != 0
-	l.Locked = flags&2 == 0
-	l.Background = flags&8 != 0
-	l.PreferLinkedCels = flags&16 != 0
-	l.GroupCollapsed = flags&32 != 0
-	l.Reference = flags&64 != 0
-
+	l.Flags = binary.LittleEndian.Uint16(raw)
 	l.Type = LayerType(binary.LittleEndian.Uint16(raw[2:]))
 	l.ChildLevel = binary.LittleEndian.Uint16(raw[4:])
 	l.BlendMode = BlendMode(binary.LittleEndian.Uint16(raw[10:]))
@@ -318,7 +311,7 @@ func (a *Ase) parseLayer(raw []byte) Layer {
 		l.UUID = uuid.Nil
 	}
 
-	return l
+	return &l
 }
 
 // Chunk0x2022
@@ -411,13 +404,13 @@ func (a *Ase) parseColorProfile(data []byte) (ColorProfile, error) {
 
 	if cp.Type == 2 {
 		if len(data) < 20 {
-			return cp, errors.New("chunk data too short for icc length")
+			return cp, errors.New("chunk data too short for icc length") // burası hala test edilmedi
 		}
 
 		iccLen := binary.LittleEndian.Uint32(data[16:20])
 
 		if uint32(len(data)) < 20+iccLen {
-			return cp, errors.New("icc profile data truncated")
+			return cp, errors.New("icc profile data truncated") // burası hala test edilmedi
 		}
 
 		cp.ICC = make([]byte, iccLen)
@@ -744,7 +737,6 @@ func (a *Ase) parseOldPalette0x0004(raw []byte) {
 	}
 }
 
-// Chunk0x0011
 func (a *Ase) parseOldPalette0x0011(raw []byte) {
 	packets := binary.LittleEndian.Uint16(raw)
 	raw = raw[2:]
@@ -754,7 +746,7 @@ func (a *Ase) parseOldPalette0x0011(raw []byte) {
 		currentIndex += skip
 		n := int(raw[1])
 		if n == 0 {
-			n = 256
+			n = 256 // bu kısım test yüzdesini düşürüyor
 		}
 		raw = raw[2:]
 		for range n {
@@ -771,32 +763,4 @@ func (a *Ase) parseOldPalette0x0011(raw []byte) {
 			currentIndex++
 		}
 	}
-}
-
-func (a *Ase) buildUserDataText() []byte {
-	n := 0
-	for _, l := range a.Layers {
-		if l.Visible {
-			n += len(l.Text)
-		}
-		for _, c := range l.Cels {
-			if c != nil {
-				n += len(c.Text)
-			}
-		}
-	}
-	return make([]byte, 0, n)
-}
-
-func (a *Ase) buildLayerUserDataText() [][]byte {
-	userdataText := a.buildUserDataText()
-	ld := make([][]byte, 0, len(a.Layers))
-	for _, l := range a.Layers {
-		if l.Visible && len(l.Text) > 0 {
-			ofs := len(userdataText)
-			userdataText = append(userdataText, l.Text...)
-			ld = append(ld, userdataText[ofs:])
-		}
-	}
-	return ld
 }

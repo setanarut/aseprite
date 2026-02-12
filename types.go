@@ -3,9 +3,9 @@ package aseprite
 //go:generate stringer -type=LayerType,BlendMode,ColorDepth,LoopDirection,CelType,FlipBitMask -output=type_string.go
 
 import (
-	"fmt"
 	"image"
 	"image/color"
+	"image/draw"
 	"time"
 
 	"github.com/google/uuid"
@@ -95,33 +95,33 @@ func (f FlipBitMask) IsFlipD() bool {
 	return f&FlipD != 0
 }
 
-type LayerFlags struct {
+// type LayerFlags struct {
 
-	// Visible: Layer visibility state.
-	Visible bool
+// 	// Visible: Layer visibility state.
+// 	Visible bool
 
-	// Locked: Layer lock state (inverse of Aseprite 'Editable' flag).
-	Locked bool
+// 	// Locked: Layer lock state (inverse of Aseprite 'Editable' flag).
+// 	Locked bool
 
-	// Background: Whether the layer is a background layer.
-	Background bool
+// 	// Background: Whether the layer is a background layer.
+// 	Background bool
 
-	// PreferLinkedCels: Whether linked cels are preferred.
-	PreferLinkedCels bool
+// 	// PreferLinkedCels: Whether linked cels are preferred.
+// 	PreferLinkedCels bool
 
-	// GroupCollapsed: Whether the group layer is collapsed.
-	GroupCollapsed bool
+// 	// GroupCollapsed: Whether the group layer is collapsed.
+// 	GroupCollapsed bool
 
-	// Reference: Whether the layer is a reference layer.
-	Reference bool
-}
+//		// Reference: Whether the layer is a reference layer.
+//		Reference bool
+//	}
 
-func (l LayerFlags) String() string {
-	return fmt.Sprintf("Visible: %v\n"+"Locked: %v\n"+
-		"Background: %v\n"+"PreferLinkedCels: %v\n"+"Collapsed: %v\n"+"Reference: %v",
-		l.Visible, l.Locked, l.Background,
-		l.PreferLinkedCels, l.GroupCollapsed, l.Reference)
-}
+// func (l LayerFlags) String() string {
+// 	return fmt.Sprintf("Visible: %v\n"+"Locked: %v\n"+
+// 		"Background: %v\n"+"PreferLinkedCels: %v\n"+"Collapsed: %v\n"+"Reference: %v",
+// 		l.Visible, l.Locked, l.Background,
+// 		l.PreferLinkedCels, l.GroupCollapsed, l.Reference)
+// }
 
 type Tile struct {
 	ID  uint32      // Tile index
@@ -261,23 +261,34 @@ func (c *Cel) BuildTilemapImage() {
 		return
 	}
 
-	ts := c.layer.tileset
-	fullWidth := c.Size.X * ts.TileSize.X
-	fullHeight := c.Size.Y * ts.TileSize.Y
+	tileset := c.layer.tileset
+	fullWidth := c.Size.X * tileset.TileSize.X
+	fullHeight := c.Size.Y * tileset.TileSize.Y
+	rect := image.Rect(0, 0, fullWidth, fullHeight)
 
-	res := image.NewNRGBA(image.Rect(0, 0, fullWidth, fullHeight))
+	var res draw.Image
+
+	switch ts := tileset.Image.(type) {
+	case *image.Paletted:
+		res = image.NewPaletted(rect, ts.Palette)
+	case *image.NRGBA:
+		res = image.NewNRGBA(rect)
+	default:
+		res = image.NewNRGBA(rect)
+	}
+
 	for i, tile := range c.Tiles {
 		if tile.ID == 0 {
 			continue
 		}
-		tileImg := ts.TileImage(tile.ID)
+		tileImg := tileset.TileImage(tile.ID)
 		if tileImg == nil {
 			continue
 		}
-		gridX := i % c.Size.X
-		gridY := i / c.Size.X
-		posX := gridX * ts.TileSize.X
-		posY := gridY * ts.TileSize.Y
+
+		posX := (i % c.Size.X) * tileset.TileSize.X
+		posY := (i / c.Size.X) * tileset.TileSize.Y
+
 		drawTile(res, tileImg, posX, posY, tile.XYD)
 	}
 	c.Image = res
@@ -306,7 +317,8 @@ type Layer struct {
 	// Layer type
 	Type LayerType
 
-	LayerFlags
+	// Layer flags
+	Flags uint16
 
 	// Blending mode of this layer.
 	BlendMode BlendMode
@@ -335,6 +347,25 @@ type Layer struct {
 
 	// rawIndex is the original index of the layer in the Aseprite file.
 	rawIndex int
+}
+
+func (l *Layer) IsVisible() bool {
+	return l.Flags&1 != 0
+}
+func (l *Layer) IsLocked() bool {
+	return l.Flags&2 == 0
+}
+func (l *Layer) IsBackgroundLayer() bool {
+	return l.Flags&8 != 0
+}
+func (l *Layer) PreferLinkedCels() bool {
+	return l.Flags&16 != 0
+}
+func (l *Layer) IsGroupCollapsed() bool {
+	return l.Flags&32 != 0
+}
+func (l *Layer) IsReferenceLayer() bool {
+	return l.Flags&64 != 0
 }
 
 // GetTileset returns the Tileset used by Tilemap layers.
