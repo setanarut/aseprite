@@ -22,11 +22,11 @@ Available chunks.
 - [x] Old palette chunk (0x0004)
 - [x] Old palette chunk (0x0011)
 - [x] Palette Chunk (0x2019)
+- [x] Color Profile Chunk (0x2007)
 
 The following chunks are not currently supported in this package.
 
 - [ ] Cel Extra Chunk (0x2006)
-- [ ] Color Profile Chunk (0x2007)
 - [ ] External Files Chunk (0x2008)
 - [ ] Mask Chunk (0x2016) DEPRECATED
 - [ ] Path Chunk (0x2017)
