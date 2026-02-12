@@ -9,7 +9,7 @@ import (
 
 func main() {
 
-	ase, err := aseprite.Read("../../test_files/test_grayscale.ase", false)
+	ase, err := aseprite.Read("../../test_files/test_paletted.ase", false)
 
 	if err != nil {
 		panic(err)
