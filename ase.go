@@ -63,7 +63,7 @@ func (a *Ase) GetLayerByName(name string) *Layer {
 	return a.Layers[idx]
 }
 
-// GetLayerByName returns the layer with the given UUID.
+// GetLayerByUUID returns the layer with the given UUID.
 // Returns nil if no layer is found with that UUID.
 func (a *Ase) GetLayerByUUID(id uuid.UUID) *Layer {
 	idx := slices.IndexFunc(a.Layers, func(l *Layer) bool {
