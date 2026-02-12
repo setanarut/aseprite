@@ -11,13 +11,15 @@ import (
 func TestAseDataStructure(t *testing.T) {
 
 	expected := Ase{
-		ColorDepth: 8,
-		Size:       image.Point{X: 64, Y: 64},
+		ColorDepth:    8,
+		Size:          image.Point{X: 64, Y: 64},
+		PixelRatio:    image.Point{1, 1},
+		HasLayersUUID: true,
 		Durations: []time.Duration{
-			500000000,
-			500000000,
-			1000000000,
-			1000000000,
+			time.Millisecond * 500,
+			time.Millisecond * 500,
+			time.Millisecond * 1000,
+			time.Millisecond * 1000,
 		},
 		Layers: []*Layer{
 			{
@@ -210,7 +212,7 @@ func TestAseDataStructure(t *testing.T) {
 		},
 	}
 
-	actual, err := Read("test.ase", false)
+	actual, err := Read("test_files/test.ase", false)
 	if err != nil {
 		t.Fatalf("Failed to read file: %v", err)
 	}
@@ -224,6 +226,13 @@ func compareAse(t *testing.T, exp, act *Ase) {
 	// Basic properties
 	if exp.ColorDepth != act.ColorDepth {
 		t.Errorf("ColorDepth: expected %d, got %d", exp.ColorDepth, act.ColorDepth)
+	}
+
+	if exp.PixelRatio != act.PixelRatio {
+		t.Errorf("PixelRatio: expected %v, got %v", exp.PixelRatio, act.PixelRatio)
+	}
+	if exp.HasLayersUUID != act.HasLayersUUID {
+		t.Errorf("HasUUID: expected %v, got %v", exp.HasLayersUUID, act.HasLayersUUID)
 	}
 
 	if exp.Size != act.Size {
