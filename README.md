@@ -1,6 +1,6 @@
 [![GoDoc](https://godoc.org/github.com/setanarut/aseprite?status.svg)](https://pkg.go.dev/github.com/setanarut/aseprite)
-[![Go Report Card](https://goreportcard.com/badge/github.com/askeladdk/aseprite)](https://goreportcard.com/report/github.com/setanarut/aseprite)
-[![Coverage Status](https://coveralls.io/repos/github/askeladdk/aseprite/badge.svg?branch=master)](https://coveralls.io/github/setanarut/aseprite?branch=master)
+[![Go Report Card](https://goreportcard.com/badge/github.com/setanarut/aseprite)](https://goreportcard.com/report/github.com/setanarut/aseprite)
+[![Coverage Status](https://coveralls.io/repos/github/setanarut/aseprite/badge.svg?branch=main)](https://coveralls.io/github/setanarut/aseprite?branch=main)
 
 # aseprite
 
