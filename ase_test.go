@@ -373,6 +373,14 @@ func TestParseWrongFile(t *testing.T) {
 
 }
 
+func TestReadFs(t *testing.T) {
+	testFS := os.DirFS("test_files")
+	_, err := ReadFs(testFS, "tilemap_grayscale.png", false)
+	if err == nil {
+		t.Errorf("Ok to read wrong file: %v", err)
+	}
+}
+
 func TestParseOldPalette0x0011(t *testing.T) {
 	a := &Ase{
 		Palette: make(color.Palette, 256),
