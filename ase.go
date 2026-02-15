@@ -77,7 +77,7 @@ func (a *Ase) GetLayerByUUID(id uuid.UUID) *Layer {
 
 // BuildTilemapImages performs the final rasterization for all cels in tilemap layers.
 // It iterates through the tile grid, resolves tile IDs via the associated tileset,
-// and assembles the final image.NRGBA composite by applying bitmask flips (X/Y/D).
+// and assembles the final image composite by applying bitmask flips (X/Y/D).
 func (a *Ase) BuildTilemapImages() {
 	for _, lyr := range a.Layers {
 		if lyr.Type == Tilemap {
