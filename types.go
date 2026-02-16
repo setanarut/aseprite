@@ -6,7 +6,6 @@ import (
 	"image"
 	"image/color"
 	"image/draw"
-	"time"
 
 	"github.com/google/uuid"
 )
@@ -188,12 +187,6 @@ func (ts *Tileset) TileImage(tileID uint32) image.Image {
 		return img.SubImage(rect)
 	}
 	return nil
-}
-
-type Frame struct {
-
-	// Duration of this frame in the animation
-	Duration time.Duration
 }
 
 type SliceFrame struct {
