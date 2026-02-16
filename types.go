@@ -361,6 +361,13 @@ func (l *Layer) IsReferenceLayer() bool {
 	return l.Flags&64 != 0
 }
 
+func (l *Layer) IsTilemapLayer() bool {
+	return l.Type == Tilemap
+}
+func (l *Layer) IsGroupLayer() bool {
+	return l.Type == Group
+}
+
 // GetTileset returns the Tileset used by Tilemap layers.
 // It returns nil if layer is not a tilemap.
 func (l *Layer) GetTileset() *Tileset {

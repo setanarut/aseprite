@@ -151,6 +151,9 @@ func TestAseDataStructure(t *testing.T) {
 						Type:       2,
 						Opacity:    255,
 						Image:      &image.Paletted{},
+						UserData: UserData{
+							Text: "tag2_start",
+						},
 					},
 					{
 						LayerIndex: 2,
@@ -178,7 +181,7 @@ func TestAseDataStructure(t *testing.T) {
 				},
 			},
 		},
-		Tags: []Tag{
+		Tags: []*Tag{
 			{
 				Name: "tag1",
 				UserData: UserData{
@@ -252,14 +255,25 @@ func TestAseProp(t *testing.T) {
 
 func TestPalettedTilemapRender(t *testing.T) {
 
-	a, err := Read("test_files/test_paletted.ase", false)
+	ase, err := Read("test_files/test_paletted.ase", false)
 	if err != nil {
 		t.Fatalf("Failed to read file: %v", err)
 	}
 
-	a.BuildTilemapImages()
+	tag2 := ase.GetTagByName("tag2")
+	imlayer := ase.GetLayerByName("my image layer")
 
-	gotImage := a.GetLayerByName("test tilemap").Cel(0).Image
+	if imlayer.Cel(tag2.Start).UserData.Text != "tag2_start" {
+		t.Errorf("tag2 start userdata text is not tag2_start")
+	}
+
+	ase.BuildTilemapImages()
+
+	if !ase.GetLayerByName("test tilemap").IsTilemapLayer() {
+		t.Errorf("test tilemap layer is not tilemap layer")
+	}
+
+	gotImage := ase.GetLayerByName("test tilemap").Cel(0).Image
 
 	gotImageP, ok := gotImage.(*image.Paletted)
 
@@ -557,7 +571,7 @@ func compareAse(t *testing.T, exp, act *Ase) {
 		t.Errorf("Tags count: expected %d, got %d", len(exp.Tags), len(act.Tags))
 	} else {
 		for i := range exp.Tags {
-			compareTag(t, i, &exp.Tags[i], &act.Tags[i])
+			compareTag(t, i, exp.Tags[i], act.Tags[i])
 		}
 	}
 

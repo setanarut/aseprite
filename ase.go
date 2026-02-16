@@ -37,7 +37,7 @@ type Ase struct {
 	Slices []Slice
 
 	// Timeline animation tags
-	Tags []Tag
+	Tags []*Tag
 
 	// Tilesets used in Tilemap layers
 	Tilesets []*Tileset
@@ -61,6 +61,18 @@ func (a *Ase) GetLayerByName(name string) *Layer {
 		return nil
 	}
 	return a.Layers[idx]
+}
+
+// GetTagByName returns the first Tag with the given name.
+// Returns nil if no layer is found with that name.
+func (a *Ase) GetTagByName(tagName string) *Tag {
+	idx := slices.IndexFunc(a.Tags, func(t *Tag) bool {
+		return t.Name == tagName
+	})
+	if idx == -1 {
+		return nil
+	}
+	return a.Tags[idx]
 }
 
 // GetLayerByUUID returns the layer with the given UUID.
@@ -218,7 +230,7 @@ func (a *Ase) parse(r io.Reader, onlyVisible bool) (filesize int64, err error) {
 				startIdx := len(a.Tags)
 				a.Tags = append(a.Tags, newTags...)
 				for k := range newTags {
-					tagQueue = append(tagQueue, &a.Tags[startIdx+k])
+					tagQueue = append(tagQueue, a.Tags[startIdx+k])
 				}
 				lastUserDataTarget = nil
 			case 0x2022:
@@ -357,18 +369,21 @@ func (a *Ase) parseSlice(raw []byte, totalFrames int) Slice {
 }
 
 // Chunk0x2018
-func (a *Ase) parseTags(raw []byte) []Tag {
+func (a *Ase) parseTags(raw []byte) []*Tag {
 	ntags := int(binary.LittleEndian.Uint16(raw))
-	tags := make([]Tag, ntags)
+	tags := make([]*Tag, 0, ntags)
 	ptr := raw[10:]
-	for i := range ntags {
-		t := &tags[i]
+
+	for range ntags {
+		t := &Tag{}
 		t.Start = int(binary.LittleEndian.Uint16(ptr))
 		t.End = int(binary.LittleEndian.Uint16(ptr[2:]))
 		t.LoopDirection = LoopDirection(ptr[4])
 		t.Repeat = binary.LittleEndian.Uint16(ptr[5:])
 		nameLen := binary.LittleEndian.Uint16(ptr[17:])
 		t.Name = string(ptr[19 : 19+nameLen])
+
+		tags = append(tags, t)
 		ptr = ptr[19+nameLen:]
 	}
 
