@@ -245,7 +245,7 @@ type Cel struct {
 	layer *Layer
 }
 
-// BuildTilemapImage rasterizes the tilemap cel into a composite image.NRGBA.
+// BuildTilemapImage rasterizes the tilemap cel into an image.
 // It resolves each tile index against the associated tileset, applies bitmask
 // transformations for flips (X/Y/D), and performs a draw-call to assemble
 // the final pixel buffer into the Cel's Image field.
